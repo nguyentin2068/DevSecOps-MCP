@@ -10,7 +10,6 @@ import winston from 'winston';
 import { SASTTool } from './tools/sast-tool.js';
 import { DASTTool } from './tools/dast-tool.js';
 import { SCATool } from './tools/sca-tool.js';
-import { IASTTool } from './tools/iast-tool.js';
 
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
@@ -30,7 +29,6 @@ class DevSecOpsMCPServer {
   private sastTool: SASTTool;
   private dastTool: DASTTool;
   private scaTool: SCATool;
-  private iastTool: IASTTool;
 
   constructor() {
     this.server = new Server(
@@ -48,7 +46,6 @@ class DevSecOpsMCPServer {
     this.sastTool = new SASTTool();
     this.dastTool = new DASTTool();
     this.scaTool = new SCATool();
-    this.iastTool = new IASTTool();
 
     this.setupHandlers();
   }
@@ -93,7 +90,7 @@ class DevSecOpsMCPServer {
                 },
                 scan_type: {
                   type: 'string',
-                  enum: ['quick', 'baseline', 'full'],
+                  enum: ['baseline', 'full'],
                   description: 'Type of DAST scan to perform'
                 },
                 authentication: {
@@ -129,29 +126,6 @@ class DevSecOpsMCPServer {
                 }
               },
               required: ['project_path']
-            }
-          },
-          {
-            name: 'run_iast_scan',
-            description: 'Execute IAST (Interactive Application Security Testing) scan',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                application_id: {
-                  type: 'string',
-                  description: 'Application identifier in IAST platform'
-                },
-                environment: {
-                  type: 'string',
-                  enum: ['development', 'staging', 'testing'],
-                  description: 'Target environment'
-                },
-                test_suite: {
-                  type: 'string',
-                  description: 'Test suite to run with IAST monitoring'
-                }
-              },
-              required: ['application_id']
             }
           },
           {
@@ -214,9 +188,6 @@ class DevSecOpsMCPServer {
           
           case 'run_sca_scan':
             return await this.scaTool.executeScan(args);
-          
-          case 'run_iast_scan':
-            return await this.iastTool.executeScan(args);
           
           case 'generate_security_report':
             return await this.generateSecurityReport(args);

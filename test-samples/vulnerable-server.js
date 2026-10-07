@@ -4,7 +4,9 @@
 const express = require('express');
 // const mysql = require('mysql2'); // Comment out for testing
 const app = express();
-const port = 3001;
+const port = Number(process.env.PORT || 3001);
+// Bind to loopback by default; set HOST=0.0.0.0 only inside an isolated lab network.
+const host = process.env.HOST || '127.0.0.1';
 
 // Middleware
 app.use(express.json());
@@ -158,8 +160,8 @@ app.use((error, req, res, next) => {
     });
 });
 
-app.listen(port, '0.0.0.0', () => {
-    console.log(`🚨 Vulnerable test server running at http://localhost:${port}`);
+app.listen(port, host, () => {
+    console.log(`🚨 Vulnerable test server running at http://${host}:${port}`);
     console.log(`🔍 Ready for DAST testing with OWASP ZAP`);
 });
 

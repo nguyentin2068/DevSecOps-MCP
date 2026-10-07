@@ -9,10 +9,7 @@ beforeAll(() => {
   
   // Mock API credentials for testing
   process.env.SONARQUBE_TOKEN = 'test-sonar-token';
-  process.env.SNYK_TOKEN = 'test-snyk-token';
   process.env.ZAP_API_KEY = 'test-zap-key';
-  process.env.VERACODE_API_ID = 'test-veracode-id';
-  process.env.VERACODE_API_KEY = 'test-veracode-key';
 });
 
 // Global test cleanup

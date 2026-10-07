@@ -414,46 +414,6 @@ export class SCATool {
     };
   }
 
-  private mapSnykResultToSCAResult(snykResult: any, scanId: string, params: SCAParams, packageManager: string): SCAScanResult {
-    const vulnerabilities = snykResult.vulnerabilities?.map(this.mapSnykVulnerabilityToSCAVulnerability) || [];
-    const licenseIssues = snykResult.licenseIssues?.map(this.mapSnykLicenseIssue) || [];
-    
-    return {
-      tool: 'Snyk',
-      scan_id: scanId,
-      status: 'completed',
-      project_path: params.project_path,
-      package_manager: packageManager,
-      vulnerabilities,
-      license_issues: licenseIssues,
-      sbom: snykResult.sbom ? {
-        components: snykResult.sbom.components || [],
-        dependencies_count: snykResult.dependenciesCount || 0,
-        direct_dependencies: snykResult.directDependencies || 0,
-        transitive_dependencies: snykResult.transitiveDependencies || 0
-      } : undefined,
-      summary: {
-        total_vulnerabilities: vulnerabilities.length,
-        critical: vulnerabilities.filter(v => v.severity === 'critical').length,
-        high: vulnerabilities.filter(v => v.severity === 'high').length,
-        medium: vulnerabilities.filter(v => v.severity === 'medium').length,
-        low: vulnerabilities.filter(v => v.severity === 'low').length,
-        fixable: vulnerabilities.filter(v => v.fix_available).length,
-        license_violations: licenseIssues.length
-      },
-      remediation: {
-        upgrades: snykResult.remediation?.upgrades || [],
-        patches: snykResult.remediation?.patches || []
-      },
-      metadata: {
-        scan_duration: 0,
-        total_dependencies: snykResult.dependenciesCount || 0,
-        direct_dependencies: snykResult.directDependencies || 0,
-        timestamp: new Date().toISOString()
-      }
-    };
-  }
-
   private async mapNpmAuditResultToSCAResult(auditResult: any, scanId: string, params: SCAParams, packageManager: string): Promise<SCAScanResult> {
     const vulnerabilities = Object.values(auditResult.vulnerabilities || {}).map(this.mapNpmVulnerabilityToSCAVulnerability);
     
@@ -524,27 +484,6 @@ export class SCATool {
     };
   }
 
-  private mapSnykVulnerabilityToSCAVulnerability(vuln: any): SCAVulnerability {
-    return {
-      id: vuln.id,
-      title: vuln.title,
-      severity: vuln.severity,
-      package_name: vuln.packageName,
-      package_version: vuln.version,
-      vulnerable_versions: vuln.semver?.vulnerable || '',
-      patched_versions: vuln.semver?.patched,
-      description: vuln.description,
-      references: vuln.references || [],
-      cve_ids: vuln.identifiers?.CVE || [],
-      cwe_ids: vuln.identifiers?.CWE || [],
-      cvss_score: vuln.cvssScore,
-      exploitability: vuln.exploitMaturity,
-      fix_available: vuln.isUpgradable || vuln.isPatchable,
-      fix_version: vuln.fixedIn?.[0],
-      upgrade_path: vuln.upgradePath || []
-    };
-  }
-
   private mapNpmVulnerabilityToSCAVulnerability(vuln: any): SCAVulnerability {
     return {
       id: vuln.via?.[0]?.url || vuln.name,
@@ -557,16 +496,6 @@ export class SCATool {
       references: vuln.via?.[0]?.url ? [vuln.via[0].url] : [],
       fix_available: vuln.fixAvailable !== false,
       fix_version: vuln.fixAvailable?.version
-    };
-  }
-
-  private mapSnykLicenseIssue(issue: any): LicenseIssue {
-    return {
-      package_name: issue.packageName,
-      package_version: issue.version,
-      license: issue.license,
-      severity: issue.severity,
-      policy_violation: issue.policyViolation
     };
   }
 

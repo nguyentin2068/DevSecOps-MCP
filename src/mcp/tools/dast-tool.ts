@@ -1,4 +1,3 @@
-import { spawn } from 'child_process';
 import axios from 'axios';
 import Joi from 'joi';
 import winston from 'winston';
@@ -12,7 +11,7 @@ const logger = winston.createLogger({
 
 interface DASTParams {
   target_url: string;
-  scan_type?: 'quick' | 'baseline' | 'full';
+  scan_type?: 'baseline' | 'full';
   authentication?: {
     username: string;
     password: string;
@@ -73,7 +72,7 @@ export class DASTTool {
   private zapConnector: ZAPConnector;
   private readonly validationSchema = Joi.object({
     target_url: Joi.string().uri().required(),
-    scan_type: Joi.string().valid('quick', 'baseline', 'full').optional(),
+    scan_type: Joi.string().valid('baseline', 'full').optional(),
     authentication: Joi.object({
       username: Joi.string().required(),
       password: Joi.string().required()
@@ -186,9 +185,6 @@ export class DASTTool {
       let scanResult;
       
       switch (scanType) {
-        case 'quick':
-          scanResult = await this.runZAPQuickScan(params, scanId);
-          break;
         case 'baseline':
           scanResult = await this.runZAPBaselineScan(params, scanId);
           break;
@@ -204,38 +200,6 @@ export class DASTTool {
       logger.error('ZAP scan failed', { error: error instanceof Error ? error.message : 'Unknown error' });
       throw error;
     }
-  }
-
-  private async runZAPQuickScan(params: DASTParams, scanId: string): Promise<DASTScanResult> {
-    return new Promise((resolve, reject) => {
-      const zapArgs = [
-        '-cmd',
-        '-quickurl', params.target_url,
-        '-quickout', `/tmp/zap-report-${scanId}.json`,
-        '-quickprogress'
-      ];
-
-      const zap = spawn('zap-baseline.py', zapArgs);
-      let output = '';
-      let errorOutput = '';
-
-      zap.stdout.on('data', (data) => {
-        output += data.toString();
-      });
-
-      zap.stderr.on('data', (data) => {
-        errorOutput += data.toString();
-      });
-
-      zap.on('close', async (code) => {
-        try {
-          const result = await this.parseZAPResults(scanId, params, 'quick');
-          resolve(result);
-        } catch (parseError) {
-          reject(new Error(`Failed to parse ZAP results: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`));
-        }
-      });
-    });
   }
 
   private async runZAPBaselineScan(params: DASTParams, scanId: string): Promise<DASTScanResult> {
@@ -263,31 +227,6 @@ export class DASTTool {
     const zapResult = await this.zapConnector.executeFullScan(zapScanParams);
     
     return this.mapZAPResultToDASTResult(zapResult, scanId, params, 'full');
-  }
-
-  private async parseZAPResults(scanId: string, params: DASTParams, scanType: string): Promise<DASTScanResult> {
-    const vulnerabilities: DASTVulnerability[] = [];
-    const coverage = {
-      urls_found: 0,
-      urls_tested: 0,
-      forms_found: 0,
-      parameters_tested: 0
-    };
-
-    return {
-      tool: 'OWASP ZAP',
-      scan_id: scanId,
-      status: 'completed',
-      target_url: params.target_url,
-      vulnerabilities,
-      summary: this.calculateSummary(vulnerabilities),
-      coverage,
-      metadata: {
-        scan_duration: 0,
-        scan_type: scanType,
-        timestamp: new Date().toISOString()
-      }
-    };
   }
 
   private mapZAPResultToDASTResult(zapResult: any, scanId: string, params: DASTParams, scanType: string): DASTScanResult {
