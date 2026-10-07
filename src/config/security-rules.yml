@@ -35,6 +35,7 @@ sast:
       - p/secrets
       - p/owasp-top-ten
     exclude:
+      - security-reports
       - node_modules
       - vendor
       - dist

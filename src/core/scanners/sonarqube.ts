@@ -158,7 +158,9 @@ export async function runSonarQube(target: string, options: SonarOptions): Promi
       '-Dsonar.sources=.',
       `-Dsonar.host.url=${options.hostUrl}`,
       `-Dsonar.working.directory=${workDir}`,
-      '-Dsonar.qualitygate.wait=false'
+      '-Dsonar.qualitygate.wait=false',
+      // Use the JVM that runs the scanner instead of downloading a JRE from the server.
+      '-Dsonar.scanner.skipJreProvisioning=true'
     ];
     if (options.exclusions.length) args.push(`-Dsonar.exclusions=${options.exclusions.join(',')}`);
 
