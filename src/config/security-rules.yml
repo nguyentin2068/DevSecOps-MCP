@@ -1,334 +1,95 @@
-# DevSecOps MCP Server Security Rules Configuration
-# This file defines security policies and thresholds for SAST, DAST, IAST, and SCA tools
+# DevSecOps security policy, loaded by src/core/config.ts and validated with Joi.
+# Used by the CLI security gate (Jenkins exit code) and by the MCP validate_security_policy tool.
+# Override the path with SECURITY_RULES_PATH or the CLI --rules flag.
 
-version: "1.0"
-last_updated: "2025-07-06"
+version: "2.0"
 
-# Global Security Policy
+# Defaults applied to every scan type unless the scan type sets its own thresholds.
 global_policy:
-  enforcement_level: "strict"  # strict, moderate, permissive
-  fail_build_on_critical: true
-  fail_build_on_high: true
-  fail_build_on_medium: false
-  max_medium_vulnerabilities: 5
-  max_low_vulnerabilities: 20
+  # strict: violations fail the gate (exit code 1)
+  # permissive: violations are reported as WARN and the gate passes (exit code 0)
+  enforcement_level: strict
+  # Maximum number of findings allowed per severity. Omit a severity (or set null) for no limit.
+  # A failed scan or a result with missing data always counts as a violation.
+  thresholds:
+    critical: 0
+    high: 0
+    medium: 5
+    low: 20
 
-# SAST (Static Application Security Testing) Rules
+# Static analysis of source code.
 sast:
-  enabled: true
-  tools:
-    - sonarqube
-    - semgrep
-  
-  quality_gates:
-    critical_threshold: 0
-    high_threshold: 0
-    medium_threshold: 5
-    code_coverage_minimum: 85
-    duplicated_lines_density_maximum: 3
-    maintainability_rating: "A"
-    reliability_rating: "A"
-    security_rating: "A"
-  
-  exclusions:
-    files:
-      - "**/*test*"
-      - "**/*spec*"
+  default_tool: semgrep
+  thresholds:
+    critical: 0
+    high: 0
+    medium: 5
+  # Fail the gate when SonarQube reports its quality gate as anything other than OK.
+  require_sonar_quality_gate: true
+  semgrep:
+    timeout_seconds: 900
+    # Registry rulesets (p/...) need egress to semgrep.dev. For air-gapped runners,
+    # point these at local rule files or directories inside the workspace instead.
+    configs:
+      - p/security-audit
+      - p/secrets
+      - p/owasp-top-ten
+    exclude:
+      - node_modules
+      - vendor
+      - dist
+      - build
+      - target
+  sonarqube:
+    timeout_seconds: 1800
+    exclusions:
       - "**/node_modules/**"
       - "**/vendor/**"
-      - "**/target/**"
-      - "**/build/**"
       - "**/dist/**"
-    
-    rules:
-      - "javascript:S1135"  # TODO comments
-      - "java:S1135"        # TODO comments
-      - "python:S1135"      # TODO comments
-  
-  custom_rules:
-    - id: "hardcoded-secrets"
-      pattern: "(password|secret|key|token)\\s*=\\s*['\"][^'\"]+['\"]"
-      severity: "critical"
-      message: "Hardcoded secrets detected"
-    
-    - id: "sql-injection"
-      pattern: "execute\\s*\\(.*\\+.*\\)"
-      severity: "high"
-      message: "Potential SQL injection vulnerability"
-    
-    - id: "xss-vulnerability"
-      pattern: "innerHTML\\s*=\\s*.*\\+.*"
-      severity: "medium"
-      message: "Potential XSS vulnerability"
 
-# DAST (Dynamic Application Security Testing) Rules
-dast:
-  enabled: true
-  tools:
-    - zap
-  
-  scan_policies:
-    baseline:
-      max_scan_duration: 1800  # 30 minutes
-      spider_max_depth: 5
-      spider_max_children: 10
-      active_scan: false
-    
-    full:
-      max_scan_duration: 7200  # 2 hours
-      spider_max_depth: 10
-      spider_max_children: 50
-      active_scan: true
-      attack_strength: "medium"
-  
-  exclusions:
-    urls:
-      - "*/logout"
-      - "*/admin/**"
-      - "*/test/**"
-      - "*/debug/**"
-    
-    parameters:
-      - "csrf_token"
-      - "session_id"
-      - "_token"
-  
-  owasp_top10_compliance:
-    - A01_2021_Broken_Access_Control
-    - A02_2021_Cryptographic_Failures
-    - A03_2021_Injection
-    - A04_2021_Insecure_Design
-    - A05_2021_Security_Misconfiguration
-    - A06_2021_Vulnerable_and_Outdated_Components
-    - A07_2021_Identification_and_Authentication_Failures
-    - A08_2021_Software_and_Data_Integrity_Failures
-    - A09_2021_Security_Logging_and_Monitoring_Failures
-    - A10_2021_Server_Side_Request_Forgery
-
-# SCA (Software Composition Analysis) Rules
+# Dependency (software composition) analysis of a source tree.
 sca:
-  enabled: true
-  tools:
-    - snyk
-    - npm-audit
-  
-  vulnerability_thresholds:
+  default_tool: osv-scanner
+  thresholds:
     critical: 0
     high: 0
     medium: 3
     low: 10
-  
-  license_policy:
-    allowed_licenses:
-      - "MIT"
-      - "Apache-2.0"
-      - "BSD-2-Clause"
-      - "BSD-3-Clause"
-      - "ISC"
-      - "Unlicense"
-    
-    restricted_licenses:
-      - "GPL-3.0"
-      - "AGPL-3.0"
-      - "LGPL-3.0"
-      - "SSPL-1.0"
-    
-    forbidden_licenses:
-      - "WTFPL"
-      - "CC-BY-NC"
-      - "Proprietary"
-  
-  auto_fix:
-    enabled: true
-    max_severity: "medium"
-    exclude_packages:
-      - "react"
-      - "angular"
-      - "vue"
-  
-  sbom_generation:
-    enabled: true
-    format: "spdx2.3"
-    include_transitive: true
-    include_licenses: true
+  osv_scanner:
+    timeout_seconds: 900
+  trivy:
+    timeout_seconds: 900
+    scanners: [vuln, secret, misconfig]
+    ignore_unfixed: false
 
-# IAST (Interactive Application Security Testing) Rules
-iast:
-  enabled: true
-  tools:
-    - veracode
-    - contrast
-  
-  performance_thresholds:
-    max_agent_overhead: 5.0  # percentage
-    max_memory_impact: 10.0  # percentage
-    max_response_time_impact: 15.0  # percentage
-  
-  coverage_requirements:
-    minimum_route_coverage: 70.0  # percentage
-    minimum_parameter_coverage: 60.0  # percentage
-  
-  runtime_protection:
-    enabled: true
-    block_attacks: false  # monitoring mode
-    log_attacks: true
-  
-  exclusions:
-    endpoints:
-      - "/health"
-      - "/metrics"
-      - "/static/**"
-      - "/assets/**"
-    
-    file_extensions:
-      - ".css"
-      - ".js"
-      - ".png"
-      - ".jpg"
-      - ".gif"
-      - ".ico"
+# Container image scanning (Trivy image).
+container:
+  default_tool: trivy
+  thresholds:
+    critical: 0
+    high: 0
+  trivy:
+    timeout_seconds: 1200
+    scanners: [vuln, secret]
+    ignore_unfixed: true
 
-# Security Policy Enforcement
-policy_enforcement:
-  pre_commit:
-    enabled: true
-    tools:
-      - "git-secrets"
-      - "semgrep"
-      - "npm-audit"
-  
-  pull_request:
-    enabled: true
-    require_security_review: true
-    block_on_high_severity: true
-    tools:
-      - "sonarqube"
-      - "snyk"
-  
-  ci_cd_pipeline:
-    enabled: true
-    stages:
-      - name: "secret_detection"
-        tools: ["git-secrets", "trufflescan"]
-        blocking: true
-      
-      - name: "sast_analysis"
-        tools: ["sonarqube", "semgrep"]
-        blocking: true
-      
-      - name: "dependency_scan"
-        tools: ["snyk", "npm-audit"]
-        blocking: true
-      
-      - name: "container_security"
-        tools: ["snyk", "trivy"]
-        blocking: false
-      
-      - name: "dast_baseline"
-        tools: ["zap"]
-        blocking: false
-        environments: ["staging"]
-      
-      - name: "iast_monitoring"
-        tools: ["veracode"]
-        blocking: false
-        environments: ["staging", "testing"]
-
-# Notification and Reporting
-notifications:
-  slack:
-    enabled: false
-    webhook_url: "${SLACK_WEBHOOK_URL}"
-    channels:
-      critical: "#security-critical"
-      high: "#security-alerts"
-      medium: "#security-review"
-  
-  email:
-    enabled: false
-    smtp_server: "${SMTP_SERVER}"
-    recipients:
-      - "security-team@company.com"
-      - "devops-team@company.com"
-  
-  jira:
-    enabled: false
-    url: "${JIRA_URL}"
-    project_key: "SEC"
-    issue_type: "Security Vulnerability"
-
-# Reporting Configuration
-reporting:
-  formats:
-    - "json"
-    - "html"
-    - "sarif"
-  
-  include_remediation: true
-  include_risk_assessment: true
-  include_compliance_status: true
-  
-  retention_policy:
-    scan_results_days: 90
-    reports_days: 365
-    metrics_days: 730
-
-# Integration Settings
-integrations:
-  git_providers:
-    github:
-      enabled: false
-      token: "${GITHUB_TOKEN}"
-      org: "${GITHUB_ORG}"
-    
-    gitlab:
-      enabled: false
-      token: "${GITLAB_TOKEN}"
-      url: "${GITLAB_URL}"
-    
-    bitbucket:
-      enabled: false
-      username: "${BITBUCKET_USERNAME}"
-      app_password: "${BITBUCKET_APP_PASSWORD}"
-  
-  issue_trackers:
-    jira:
-      enabled: false
-      url: "${JIRA_URL}"
-      username: "${JIRA_USERNAME}"
-      token: "${JIRA_TOKEN}"
-    
-    github_issues:
-      enabled: false
-      token: "${GITHUB_TOKEN}"
-      repo: "${GITHUB_REPO}"
-  
-  monitoring:
-    prometheus:
-      enabled: false
-      endpoint: "${PROMETHEUS_ENDPOINT}"
-    
-    grafana:
-      enabled: false
-      url: "${GRAFANA_URL}"
-      api_key: "${GRAFANA_API_KEY}"
-
-# Custom Security Checks
-custom_checks:
-  - name: "container_image_scan"
-    description: "Scan container images for vulnerabilities"
-    command: "trivy image --format json ${IMAGE_NAME}"
-    severity_threshold: "high"
-    enabled: true
-  
-  - name: "infrastructure_scan"
-    description: "Scan infrastructure as code"
-    command: "checkov -f ${TERRAFORM_FILE} --framework terraform"
-    severity_threshold: "medium"
-    enabled: true
-  
-  - name: "api_security_test"
-    description: "API security testing"
-    command: "newman run ${POSTMAN_COLLECTION} --environment ${ENVIRONMENT}"
-    severity_threshold: "medium"
-    enabled: false
+# Dynamic analysis of a running application (OWASP ZAP daemon via its API).
+dast:
+  default_tool: zap
+  thresholds:
+    critical: 0
+    high: 0
+    medium: 10
+  zap:
+    # baseline: spider + passive scan; full: adds the active scan (only against test environments)
+    mode: baseline
+    spider_max_minutes: 10
+    passive_wait_minutes: 10
+    active_max_minutes: 60
+    max_alerts: 5000
+  # SSRF guard. Loopback, link-local (cloud metadata 169.254.169.254) and reserved addresses
+  # are refused unless allowlisted here. When any allowlist entry is set, only matching
+  # targets are scanned. Hosts support a leading "*." wildcard.
+  target_policy:
+    allowed_hosts: []
+    allowed_cidrs: []

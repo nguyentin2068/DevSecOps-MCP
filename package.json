@@ -3,13 +3,18 @@
   "version": "2.0.0",
   "description": "Self-hosted DevSecOps scan runner for Jenkins (Semgrep, SonarQube, OSV-Scanner, Trivy, OWASP ZAP) with a read-only MCP server for AI triage",
   "main": "dist/src/mcp/server.js",
+  "bin": {
+    "devsecops-scan": "dist/src/cli.js"
+  },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "lint": "eslint src tests",
+    "test": "jest",
     "start": "node dist/src/mcp/server.js",
     "start:mcp": "npm run build && npm start",
     "dev": "ts-node src/mcp/server.ts",
-    "test": "jest",
-    "lint": "eslint src tests",
+    "scan": "node dist/src/cli.js",
     "security:scan": "npm audit --audit-level high"
   },
   "keywords": [
