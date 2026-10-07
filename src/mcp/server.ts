@@ -1,53 +1,30 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { loadRules } from '../core/config';
-import { ValidationError } from '../core/guards';
 import { errorMessage, logger } from '../core/logger';
-import { ReportStore } from '../core/report-store';
-import { callTool, ToolContext, TOOL_DEFINITIONS } from './tools';
+import { startHttp } from './http';
+import { createToolContext, startStdio } from './mcp';
 
-export const SERVER_INFO = { name: 'devsecops-mcp-server', version: '2.0.0' };
+export { createMcpServer, createToolContext, SERVER_INFO } from './mcp';
+export { createHttpApp } from './http';
 
-export function createToolContext(env: NodeJS.ProcessEnv = process.env): ToolContext {
-  return {
-    store: ReportStore.fromEnv(env),
-    rules: loadRules(env['SECURITY_RULES_PATH'] || undefined),
-    maxResponseBytes: Number(env['MCP_MAX_RESPONSE_BYTES'] || 1024 * 1024)
-  };
-}
-
-/** Build an MCP server exposing the read-only tools over the given context. */
-export function createMcpServer(ctx: ToolContext): Server {
-  const server = new Server(SERVER_INFO, { capabilities: { tools: {} } });
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_DEFINITIONS }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    try {
-      return await callTool(name, args, ctx);
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw new McpError(ErrorCode.InvalidParams, error.message);
-      }
-      // Internal details (paths, stack traces) stay in the server log.
-      logger.error('Tool execution failed', { tool: name, error: errorMessage(error) });
-      throw new McpError(ErrorCode.InternalError, `Tool ${name} failed`);
-    }
-  });
-
-  return server;
-}
-
-export async function startStdio(ctx: ToolContext): Promise<void> {
-  const server = createMcpServer(ctx);
-  await server.connect(new StdioServerTransport());
-  logger.info('DevSecOps MCP server ready on stdio', { reports_dir: ctx.store.baseDir });
+/**
+ * Entry point. MCP_TRANSPORT=http (or --http) serves Streamable HTTP with a bearer token;
+ * the default stdio transport is for local MCP clients that spawn this process.
+ */
+async function main(): Promise<void> {
+  const ctx = createToolContext();
+  const transport = process.argv.includes('--http') ? 'http' : process.env['MCP_TRANSPORT'] || 'stdio';
+  if (transport === 'http') {
+    const server = await startHttp(ctx);
+    const shutdown = () => server.close(() => process.exit(0));
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+    return;
+  }
+  if (transport !== 'stdio') throw new Error(`Unknown MCP_TRANSPORT: ${transport}`);
+  await startStdio(ctx);
 }
 
 if (require.main === module) {
-  startStdio(createToolContext()).catch((error) => {
+  main().catch((error) => {
     logger.error('Server failed to start', { error: errorMessage(error) });
     process.exit(1);
   });
