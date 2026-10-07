@@ -21,7 +21,7 @@ describe('MCP server over Streamable HTTP', () => {
   beforeAll(async () => {
     const reportsDir = tempDir('mcp-reports-');
     const store = new ReportStore(reportsDir);
-    await store.save(scanResult({ scan_id: 'sast-semgrep-0001', finished_at: '2026-01-01T00:00:00Z', findings: findings({ high: 2, low: 3 }) }));
+    await store.save(scanResult({ scan_id: 'sast-opengrep-0001', finished_at: '2026-01-01T00:00:00Z', findings: findings({ high: 2, low: 3 }) }));
     await store.save(scanResult({ scan_id: 'sca-trivy-0001', scan_type: 'sca', tool: 'trivy', finished_at: '2026-01-02T00:00:00Z' }));
 
     // A planted symlink to a file outside the reports dir must not be readable through the API.
@@ -122,20 +122,20 @@ describe('MCP server over Streamable HTTP', () => {
 
     it('lists stored scans newest first and ignores non-scan directories', async () => {
       const scans = (await call(client, 'list_scans', {})) as Array<{ scan_id: string }>;
-      expect(scans.map((scan) => scan.scan_id)).toEqual(['sca-trivy-0001', 'sast-semgrep-0001']);
+      expect(scans.map((scan) => scan.scan_id)).toEqual(['sca-trivy-0001', 'sast-opengrep-0001']);
       const sast = (await call(client, 'list_scans', { scan_type: 'sast' })) as unknown[];
       expect(sast).toHaveLength(1);
     });
 
     it('reads a scan result with severity filtering and pagination', async () => {
-      const result = (await call(client, 'get_scan_result', { scan_id: 'sast-semgrep-0001', min_severity: 'high' })) as {
+      const result = (await call(client, 'get_scan_result', { scan_id: 'sast-opengrep-0001', min_severity: 'high' })) as {
         findings: Array<{ severity: string }>;
         pagination: { matching: number; total: number };
       };
       expect(result.findings.map((f) => f.severity)).toEqual(['high', 'high']);
       expect(result.pagination).toMatchObject({ matching: 2, total: 5 });
 
-      const page = (await call(client, 'get_scan_result', { scan_id: 'sast-semgrep-0001', offset: 4, limit: 10 })) as {
+      const page = (await call(client, 'get_scan_result', { scan_id: 'sast-opengrep-0001', offset: 4, limit: 10 })) as {
         findings: unknown[];
       };
       expect(page.findings).toHaveLength(1);
@@ -151,7 +151,7 @@ describe('MCP server over Streamable HTTP', () => {
     );
 
     it('summarizes findings for triage with the policy decision', async () => {
-      const digest = (await call(client, 'summarize_findings', { scan_ids: ['sast-semgrep-0001'] })) as {
+      const digest = (await call(client, 'summarize_findings', { scan_ids: ['sast-opengrep-0001'] })) as {
         policy: { status: string };
         totals: { high: number; low: number };
         groups: Array<{ rule_id: string; count: number }>;
@@ -164,7 +164,7 @@ describe('MCP server over Streamable HTTP', () => {
     it('validates the policy against stored results', async () => {
       const pass = (await call(client, 'validate_security_policy', { scan_ids: ['sca-trivy-0001'] })) as { status: string };
       expect(pass.status).toBe('PASS');
-      const fail = (await call(client, 'validate_security_policy', { scan_ids: ['sast-semgrep-0001', 'sca-trivy-0001'] })) as {
+      const fail = (await call(client, 'validate_security_policy', { scan_ids: ['sast-opengrep-0001', 'sca-trivy-0001'] })) as {
         status: string;
         reasons: string[];
       };
@@ -173,13 +173,13 @@ describe('MCP server over Streamable HTTP', () => {
     });
 
     it('generates markdown, json and sarif reports', async () => {
-      const markdown = (await call(client, 'generate_security_report', { scan_ids: ['sast-semgrep-0001'] })) as string;
+      const markdown = (await call(client, 'generate_security_report', { scan_ids: ['sast-opengrep-0001'] })) as string;
       expect(markdown).toMatch(/^# Security Scan Report/);
-      const json = (await call(client, 'generate_security_report', { scan_ids: ['sast-semgrep-0001'], format: 'json' })) as {
+      const json = (await call(client, 'generate_security_report', { scan_ids: ['sast-opengrep-0001'], format: 'json' })) as {
         policy: { status: string };
       };
       expect(json.policy.status).toBe('FAIL');
-      const sarif = (await call(client, 'generate_security_report', { scan_ids: ['sast-semgrep-0001', 'sca-trivy-0001'], format: 'sarif' })) as {
+      const sarif = (await call(client, 'generate_security_report', { scan_ids: ['sast-opengrep-0001', 'sca-trivy-0001'], format: 'sarif' })) as {
         runs: unknown[];
       };
       expect(sarif.runs).toHaveLength(2);
@@ -188,7 +188,7 @@ describe('MCP server over Streamable HTTP', () => {
     it('rejects unknown tools, scan-triggering tools and unexpected arguments', async () => {
       await expect(client.callTool({ name: 'run_sast_scan', arguments: { target: '/' } })).rejects.toThrow(/Unknown tool/);
       await expect(
-        client.callTool({ name: 'validate_security_policy', arguments: { scan_ids: ['sast-semgrep-0001'], policy_file: '/etc/passwd' } })
+        client.callTool({ name: 'validate_security_policy', arguments: { scan_ids: ['sast-opengrep-0001'], policy_file: '/etc/passwd' } })
       ).rejects.toThrow(/not allowed/);
       await expect(client.callTool({ name: 'list_scans', arguments: { limit: 100000 } })).rejects.toThrow(/Invalid arguments/);
     });

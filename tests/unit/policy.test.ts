@@ -59,9 +59,9 @@ global_policy:
   });
 
   it('fails a scan that did not complete', () => {
-    const decision = evaluatePolicy([scanResult({ status: 'failed', error: 'semgrep crashed' })], rules);
+    const decision = evaluatePolicy([scanResult({ status: 'failed', error: 'opengrep crashed' })], rules);
     expect(decision.status).toBe('FAIL');
-    expect(decision.reasons.join('\n')).toMatch(/did not complete.*semgrep crashed/);
+    expect(decision.reasons.join('\n')).toMatch(/did not complete.*opengrep crashed/);
   });
 
   it('fails a result without a summary', () => {
@@ -89,14 +89,6 @@ global_policy:
   it('fails an unknown scan type', () => {
     const odd = { ...scanResult(), scan_type: 'iast' } as never;
     expect(evaluatePolicy([odd], rules).status).toBe('FAIL');
-  });
-
-  it('requires an OK SonarQube quality gate when configured', () => {
-    const sonar = (status: string) => scanResult({ tool: 'sonarqube', metadata: { quality_gate_status: status } });
-    expect(evaluatePolicy([sonar('OK')], rules).status).toBe('PASS');
-    const decision = evaluatePolicy([sonar('ERROR')], rules);
-    expect(decision.status).toBe('FAIL');
-    expect(decision.reasons.join('\n')).toMatch(/quality gate is ERROR/);
   });
 
   it('reports WARN instead of FAIL under permissive enforcement', () => {

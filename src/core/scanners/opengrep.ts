@@ -3,14 +3,17 @@ import { validateOptionValue } from '../guards';
 import { parseJsonOutput, runCommand, stderrTail } from '../process';
 import { Finding, ScannerOutput, Severity, UNKNOWN_SEVERITY } from '../types';
 
-export interface SemgrepOptions {
+export interface OpengrepOptions {
   bin: string;
   configs: string[];
   exclude: string[];
   timeoutSeconds: number;
+  /** Cross-function taint tracking within a file (Opengrep's --taint-intrafile). */
+  taintIntrafile: boolean;
+  env?: NodeJS.ProcessEnv;
 }
 
-interface SemgrepResult {
+interface OpengrepResult {
   check_id: string;
   path: string;
   start?: { line?: number };
@@ -27,8 +30,8 @@ interface SemgrepResult {
   };
 }
 
-interface SemgrepOutput {
-  results?: SemgrepResult[];
+interface OpengrepOutput {
+  results?: OpengrepResult[];
   errors?: Array<{ level?: string; message?: string }>;
   version?: string;
 }
@@ -50,7 +53,8 @@ function asList(value: string | string[] | undefined): string[] {
   return Array.isArray(value) ? value : [value];
 }
 
-export function parseSemgrep(output: SemgrepOutput, targetRoot: string): ScannerOutput {
+/** Opengrep keeps Semgrep's JSON output format (it forked Semgrep 1.100). */
+export function parseOpengrep(output: OpengrepOutput, targetRoot: string): ScannerOutput {
   const findings: Finding[] = (output.results ?? []).map((result) => {
     const file = path.isAbsolute(result.path) ? path.relative(targetRoot, result.path) : result.path;
     const line = result.start?.line ?? 0;
@@ -80,19 +84,24 @@ export function parseSemgrep(output: SemgrepOutput, targetRoot: string): Scanner
   };
 }
 
-export async function runSemgrep(target: string, options: SemgrepOptions): Promise<ScannerOutput> {
-  const args = ['scan', '--json', '--metrics=off', '--disable-version-check', '--quiet'];
-  for (const config of options.configs) args.push('--config', validateOptionValue(config, 'Semgrep config'));
-  for (const pattern of options.exclude) args.push('--exclude', validateOptionValue(pattern, 'Semgrep exclude'));
+export async function runOpengrep(target: string, options: OpengrepOptions): Promise<ScannerOutput> {
+  const args = ['scan', '--json', '--disable-version-check', '--quiet'];
+  if (options.taintIntrafile) args.push('--taint-intrafile');
+  for (const config of options.configs) args.push('--config', validateOptionValue(config, 'Opengrep config'));
+  for (const pattern of options.exclude) args.push('--exclude', validateOptionValue(pattern, 'Opengrep exclude'));
   args.push('--', target);
 
+  const base = options.env ?? process.env;
   const { code, stdout, stderr } = await runCommand(options.bin, args, {
     cwd: target,
-    timeoutMs: options.timeoutSeconds * 1000
+    timeoutMs: options.timeoutSeconds * 1000,
+    // The bundled runtime reads rule files with the locale's encoding; without a UTF-8
+    // locale (common in minimal containers) rules containing non-ASCII text fail to load.
+    env: { ...base, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }
   });
   // 0 = success, 1 = findings with --error; anything else is a scanner failure.
   if (code !== 0 && code !== 1) {
-    throw new Error(`semgrep exited with code ${code}: ${stderrTail(stderr)}`);
+    throw new Error(`opengrep exited with code ${code}: ${stderrTail(stderr)}`);
   }
-  return parseSemgrep(parseJsonOutput<SemgrepOutput>('semgrep', stdout), target);
+  return parseOpengrep(parseJsonOutput<OpengrepOutput>('opengrep', stdout), target);
 }

@@ -17,23 +17,29 @@ global_policy:
     medium: 5
     low: 20
 
-# Static analysis of source code.
+# Static analysis of source code (Opengrep, an LGPL fork of Semgrep CE).
 sast:
-  default_tool: semgrep
+  default_tool: opengrep
   thresholds:
     critical: 0
     high: 0
     medium: 5
-  # Fail the gate when SonarQube reports its quality gate as anything other than OK.
-  require_sonar_quality_gate: true
-  semgrep:
+  opengrep:
     timeout_seconds: 900
-    # Registry rulesets (p/...) need egress to semgrep.dev. For air-gapped runners,
-    # point these at local rule files or directories inside the workspace instead.
+    # Track tainted data across functions within a file (--taint-intrafile).
+    taint_intrafile: true
+    # Relative paths resolve against this file's directory; ${VAR} expands from the environment.
+    # The scanner image ships opengrep-rules at a pinned commit in ${OPENGREP_RULES_DIR}.
+    # Registry packs (p/...) are passed through as-is but are covered by the Semgrep Rules
+    # License; prefer local rules you control.
     configs:
-      - p/security-audit
-      - p/secrets
-      - p/owasp-top-ten
+      - opengrep/baseline.yml
+      - ${OPENGREP_RULES_DIR}/javascript
+      - ${OPENGREP_RULES_DIR}/typescript
+      - ${OPENGREP_RULES_DIR}/python
+      - ${OPENGREP_RULES_DIR}/java
+      - ${OPENGREP_RULES_DIR}/go
+      - ${OPENGREP_RULES_DIR}/generic/secrets
     exclude:
       - security-reports
       - node_modules
@@ -41,12 +47,6 @@ sast:
       - dist
       - build
       - target
-  sonarqube:
-    timeout_seconds: 1800
-    exclusions:
-      - "**/node_modules/**"
-      - "**/vendor/**"
-      - "**/dist/**"
 
 # Dependency (software composition) analysis of a source tree.
 sca:
@@ -74,20 +74,41 @@ container:
     scanners: [vuln, secret]
     ignore_unfixed: true
 
-# Dynamic analysis of a running application (OWASP ZAP daemon via its API).
+# Dynamic analysis of a running application: katana crawls, nuclei runs templates.
 dast:
-  default_tool: zap
+  default_tool: nuclei
   thresholds:
     critical: 0
     high: 0
     medium: 10
-  zap:
-    # baseline: spider + passive scan; full: adds the active scan (only against test environments)
-    mode: baseline
-    spider_max_minutes: 10
-    passive_wait_minutes: 10
-    active_max_minutes: 60
-    max_alerts: 5000
+  # baseline: nuclei HTTP templates against the target URL (known CVEs, misconfigurations,
+  #           exposures). No crawl: templates build their own paths from the base URL.
+  # full:     baseline + katana crawl + nuclei's DAST fuzzing templates on crawled URLs that
+  #           have parameters (active attacks: test environments only)
+  mode: baseline
+  # Used in full mode to find fuzzable URLs. Results are limited to the target's origin.
+  crawl:
+    enabled: true
+    max_depth: 3
+    max_duration_seconds: 300
+    max_urls: 500
+    # Parse JavaScript for endpoints (more coverage, more requests).
+    js_crawl: false
+  nuclei:
+    timeout_seconds: 1800
+    # The scanner image ships nuclei-templates at a pinned tag in ${NUCLEI_TEMPLATES_DIR}.
+    templates:
+      - ${NUCLEI_TEMPLATES_DIR}
+    # Empty = all severities. Info-level findings (tech fingerprints) are not gated by default.
+    severities: []
+    include_tags: []
+    # Never run denial-of-service or intrusive templates from CI.
+    exclude_tags: [dos, intrusive]
+    exclude_template_ids: []
+    # Requests per second and parallel templates (nuclei's defaults). Lower for fragile targets.
+    rate_limit: 150
+    concurrency: 25
+    request_timeout_seconds: 10
   # SSRF guard. Loopback, link-local (cloud metadata 169.254.169.254) and reserved addresses
   # are refused unless allowlisted here. When any allowlist entry is set, only matching
   # targets are scanned. Hosts support a leading "*." wildcard.
