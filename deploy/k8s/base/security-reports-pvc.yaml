@@ -1,0 +1,14 @@
+# Shared results volume: scanner Jobs/agents write, the MCP server mounts it read-only.
+# ReadWriteMany lets writers and the reader run on different nodes (NFS, CephFS, EFS,
+# Azure Files...). With only ReadWriteOnce storage, switch the access mode and schedule the
+# writers on the MCP server's node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: security-reports
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi

@@ -1,0 +1,44 @@
+# Pod template for the Jenkins Kubernetes plugin. In the Jenkinsfile use:
+#   agent { kubernetes { yamlFile 'deploy/k8s/jenkins/scanner-pod.yaml'; defaultContainer 'scanner' } }
+# The plugin adds the jnlp container. The label lets the NetworkPolicies admit this pod to
+# SonarQube and ZAP.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    devsecops.io/scanner: "true"
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: scanner
+      image: registry.example.com/devsecops-scanner:2.0.0
+      command: ["sleep"]
+      args: ["infinity"]
+      env:
+        - name: TRIVY_CACHE_DIR
+          value: /var/cache/trivy
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      volumeMounts:
+        - name: trivy-cache
+          mountPath: /var/cache/trivy
+  volumes:
+    - name: trivy-cache
+      emptyDir:
+        sizeLimit: 2Gi
