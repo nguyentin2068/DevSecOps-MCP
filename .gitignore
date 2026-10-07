@@ -6,3 +6,5 @@ security-test-results.json
 .DS_Store
 *.tmp
 coverage/
+security-reports/
+.scannerwork/

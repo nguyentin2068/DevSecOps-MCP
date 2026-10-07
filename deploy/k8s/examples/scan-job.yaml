@@ -1,0 +1,105 @@
+# On-demand scan without Jenkins: clone a repository, run SCA + SAST and write the results to
+# the shared security-reports volume, where the MCP server can read them.
+#   kubectl -n devsecops create -f deploy/k8s/examples/scan-job.yaml
+# Edit REPO_URL / REPO_REF (public repo shown; mount a deploy key Secret for private repos).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: devsecops-scan-
+  namespace: devsecops
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        devsecops.io/scanner: "true"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: clone
+          image: alpine/git:2.49.1
+          args: ["clone", "--depth", "1", "--branch", "$(REPO_REF)", "$(REPO_URL)", "/workspace/src"]
+          env:
+            - name: REPO_URL
+              value: https://github.com/nguyentin2068/DevSecOps-MCP.git
+            - name: REPO_REF
+              value: main
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: scanner
+          image: registry.example.com/devsecops-scanner:2.0.0
+          command: ["sh", "-c"]
+          # --no-fail on each scan, then one gate: the Job fails when the policy fails.
+          args:
+            - |
+              set -e
+              id="$(date -u +%Y%m%dt%H%M%S)-${HOSTNAME##*-}"
+              devsecops-scan sca --tool trivy --target /workspace/src --scan-id "sca-trivy-job-$id" --no-fail
+              devsecops-scan sast --tool semgrep --target /workspace/src --scan-id "sast-semgrep-job-$id" --no-fail
+              devsecops-scan gate --scan-id "sca-trivy-job-$id" --scan-id "sast-semgrep-job-$id"
+          env:
+            - name: SCAN_WORKSPACE_ROOTS
+              value: /workspace/src
+            - name: REPORTS_DIR
+              value: /workspace/security-reports
+            - name: TRIVY_CACHE_DIR
+              value: /var/cache/trivy
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace/src
+              subPath: src
+            - name: reports
+              mountPath: /workspace/security-reports
+            - name: trivy-cache
+              mountPath: /var/cache/trivy
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: reports
+          persistentVolumeClaim:
+            claimName: security-reports
+        - name: trivy-cache
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: tmp
+          emptyDir: {}

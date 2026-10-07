@@ -1,183 +1,183 @@
-version: '3.8'
+# Local self-hosted stack: read-only MCP server, SonarQube + PostgreSQL, OWASP ZAP daemon,
+# and an on-demand scanner container (the same image Jenkins uses).
+#
+#   cp .env.example .env            # then fill in every secret
+#   mkdir -p security-reports
+#   docker compose up -d --build    # mcp, sonarqube, postgres, zap
+#   docker compose run --rm scanner devsecops-scan sast --target /workspace/src
+#
+# Secrets have no defaults on purpose: compose refuses to start until .env provides them.
+# Published ports bind to 127.0.0.1 only; put a TLS reverse proxy in front for remote access.
+
+name: devsecops
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
 
 services:
-  devsecops-mcp:
+  mcp:
     build:
       context: .
-      dockerfile: Dockerfile
-      target: production
-    container_name: devsecops-mcp-server
-    ports:
-      - "3000:3000"
+      target: mcp
+    image: devsecops-mcp:${IMAGE_TAG:-local}
+    <<: *hardening
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
-      - NODE_ENV=production
-      - MCP_PORT=3000
-      - LOG_LEVEL=info
-      - SECURITY_STRICT_MODE=true
-      # Tool configurations (use environment variables or secrets)
-      - SONARQUBE_URL=${SONARQUBE_URL:-http://sonarqube:9000}
-      - SONARQUBE_TOKEN=${SONARQUBE_TOKEN}
-      - ZAP_URL=${ZAP_URL:-http://zap:8080}
-      - ZAP_API_KEY=${ZAP_API_KEY}
-      - OSV_SCANNER_PATH=${OSV_SCANNER_PATH:-osv-scanner}
-      - OSV_DB_PATH=${OSV_DB_PATH:-/tmp/osv-db}
-      - TRIVY_PATH=${TRIVY_PATH:-trivy}
-      - TRIVY_CACHE_DIR=${TRIVY_CACHE_DIR:-/tmp/trivy-cache}
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "3000"
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env (openssl rand -hex 32)}
+      REPORTS_DIR: /app/security-reports
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
-      - ./security-reports:/app/security-reports
-      - ./logs:/app/logs
-      - trivy-cache:/tmp/trivy-cache
-      - osv-db:/tmp/osv-db
-    networks:
-      - devsecops-network
+      # The MCP server only reads results; the scanner writes them.
+      - ./security-reports:/app/security-reports:ro
+    ports:
+      - "127.0.0.1:${MCP_PORT:-3000}:3000"
+    networks: [devsecops]
     restart: unless-stopped
-    depends_on:
-      - sonarqube
-      - zap
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 40s
+      start_period: 10s
+
+  # On-demand scans: docker compose run --rm scanner devsecops-scan <type> ...
+  scanner:
+    build:
+      context: .
+      target: scanner
+    image: devsecops-scanner:${IMAGE_TAG:-local}
+    profiles: [scan]
+    <<: *hardening
+    # Match the owner of ./security-reports on the host (default 1000:1000).
+    user: "${SCAN_UID:-1000}:${SCAN_GID:-1000}"
+    environment:
+      SCAN_WORKSPACE_ROOTS: /workspace
+      REPORTS_DIR: /workspace/security-reports
+      SONAR_HOST_URL: http://sonarqube:9000
+      SONAR_TOKEN: ${SONAR_TOKEN:-}
+      ZAP_URL: http://zap:8080
+      ZAP_API_KEY: ${ZAP_API_KEY:?set ZAP_API_KEY in .env}
+      TRIVY_CACHE_DIR: /var/cache/trivy
+    volumes:
+      - ${SCAN_SOURCE:-./test-samples}:/workspace/src:ro
+      - ./security-reports:/workspace/security-reports
+      - trivy-cache:/var/cache/trivy
+    networks: [devsecops]
 
   sonarqube:
-    image: sonarqube:9.9-community
-    container_name: devsecops-sonarqube
-    ports:
-      - "9000:9000"
-    environment:
-      - SONAR_JDBC_URL=jdbc:postgresql://postgres:5432/sonar
-      - SONAR_JDBC_USERNAME=sonar
-      - SONAR_JDBC_PASSWORD=sonar
-      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
-    volumes:
-      - sonarqube_data:/opt/sonarqube/data
-      - sonarqube_logs:/opt/sonarqube/logs
-      - sonarqube_extensions:/opt/sonarqube/extensions
-    networks:
-      - devsecops-network
+    image: sonarqube:26.9.0.129388-community
+    <<: *hardening
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonar
+      SONAR_JDBC_USERNAME: ${SONAR_DB_USER:-sonar}
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD:?set SONAR_DB_PASSWORD in .env}
+      # Local development only: skips the vm.max_map_count bootstrap check. On real hosts set
+      # vm.max_map_count=524288 and remove this (see deploy/k8s for the cluster equivalent).
+      SONAR_SEARCH_JAVAADDITIONALOPTS: "-Dnode.store.allow_mmap=false"
+    # Elasticsearch's bootstrap checks require at least 65535 open files.
+    ulimits:
+      nofile:
+        soft: 131072
+        hard: 131072
+      nproc: 8192
+    volumes:
+      - sonarqube-data:/opt/sonarqube/data
+      - sonarqube-extensions:/opt/sonarqube/extensions
+      - sonarqube-logs:/opt/sonarqube/logs
+    ports:
+      # UI is needed once to change the admin password and create the scanner token.
+      - "127.0.0.1:${SONAR_PORT:-9000}:9000"
+    networks: [devsecops]
     restart: unless-stopped
+    healthcheck:
+      # The image ships neither curl nor wget, so the probe speaks HTTP over bash's /dev/tcp.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /api/system/status HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"UP\"' <&3"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
 
   postgres:
-    image: postgres:13-alpine
-    container_name: devsecops-postgres
+    image: postgres:17.11
     environment:
-      - POSTGRES_USER=sonar
-      - POSTGRES_PASSWORD=sonar
-      - POSTGRES_DB=sonar
+      POSTGRES_USER: ${SONAR_DB_USER:-sonar}
+      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD:?set SONAR_DB_PASSWORD in .env}
+      POSTGRES_DB: sonar
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - devsecops-network
+      - postgres-data:/var/lib/postgresql/data
+    networks: [devsecops]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d sonar"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   zap:
-    image: owasp/zap2docker-stable:latest
-    container_name: devsecops-zap
-    ports:
-      - "8080:8080"
-    command: zap-webswing.sh
-    environment:
-      - ZAP_API_KEY=${ZAP_API_KEY:-default-api-key}
-    volumes:
-      - zap_data:/zap/wrk
-    networks:
-      - devsecops-network
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    container_name: devsecops-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - devsecops-network
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: devsecops-prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    networks:
-      - devsecops-network
-    restart: unless-stopped
+    # Official ZAP image (the owasp/zap2docker-* images are retired). Override with ZAP_IMAGE.
+    image: ${ZAP_IMAGE:-ghcr.io/zaproxy/zaproxy:stable}
+    <<: *hardening
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--web.enable-lifecycle'
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: devsecops-grafana
-    ports:
-      - "3001:3000"
+      - zap.sh
+      - -daemon
+      - -host
+      - 0.0.0.0
+      - -port
+      - "8080"
+      - -config
+      - api.key=${ZAP_API_KEY:?set ZAP_API_KEY in .env}
+      # Accept API calls from the compose network (the API key is still required).
+      - -config
+      - api.addrs.addr.name=.*
+      - -config
+      - api.addrs.addr.regex=true
+    networks: [devsecops]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs -H \"X-ZAP-API-Key: $${ZAP_API_KEY}\" http://127.0.0.1:8080/JSON/core/view/version/ > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
-    networks:
-      - devsecops-network
-    depends_on:
-      - prometheus
-    restart: unless-stopped
+      ZAP_API_KEY: ${ZAP_API_KEY:?set ZAP_API_KEY in .env}
 
-  nginx:
-    image: nginx:alpine
-    container_name: devsecops-nginx
-    ports:
-      - "80:80"
-      - "443:443"
+  # Deliberately vulnerable demo app for trying DAST: docker compose --profile demo up -d dast-target
+  # then: docker compose run --rm scanner devsecops-scan dast --target http://dast-target:3001/
+  dast-target:
+    image: devsecops-mcp:${IMAGE_TAG:-local}
+    profiles: [demo]
+    <<: *hardening
+    read_only: true
+    command: ["node", "/samples/vulnerable-server.js"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3001"
+      NODE_PATH: /app/node_modules
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
-      - ./nginx/ssl:/etc/nginx/ssl
-    networks:
-      - devsecops-network
-    depends_on:
-      - devsecops-mcp
-      - sonarqube
-      - grafana
-    restart: unless-stopped
+      - ./test-samples:/samples:ro
+    networks: [devsecops]
+    healthcheck:
+      disable: true
 
 volumes:
-  sonarqube_data:
-    driver: local
-  sonarqube_logs:
-    driver: local
-  sonarqube_extensions:
-    driver: local
-  postgres_data:
-    driver: local
-  zap_data:
-    driver: local
-  redis_data:
-    driver: local
-  prometheus_data:
-    driver: local
-  grafana_data:
-    driver: local
+  sonarqube-data:
+  sonarqube-extensions:
+  sonarqube-logs:
+  postgres-data:
   trivy-cache:
-    driver: local
-  osv-db:
-    driver: local
 
 networks:
-  devsecops-network:
+  devsecops:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16

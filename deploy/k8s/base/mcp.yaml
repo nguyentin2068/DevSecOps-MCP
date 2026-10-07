@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp
+  labels:
+    app.kubernetes.io/name: mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp
+    spec:
+      serviceAccountName: mcp
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          image: devsecops-mcp
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: MCP_TRANSPORT
+              value: http
+            - name: MCP_HOST
+              value: 0.0.0.0
+            - name: MCP_PORT
+              value: "3000"
+            - name: MCP_AUTH_TOKEN_FILE
+              value: /var/run/secrets/devsecops/mcp-auth-token
+            - name: REPORTS_DIR
+              value: /app/security-reports
+            - name: LOG_LEVEL
+              value: info
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          volumeMounts:
+            - name: reports
+              mountPath: /app/security-reports
+              readOnly: true
+            - name: auth-token
+              mountPath: /var/run/secrets/devsecops
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: reports
+          persistentVolumeClaim:
+            claimName: security-reports
+            readOnly: true
+        - name: auth-token
+          secret:
+            secretName: devsecops-secrets
+            defaultMode: 0440
+            items:
+              - key: mcp-auth-token
+                path: mcp-auth-token
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp
+  labels:
+    app.kubernetes.io/name: mcp
+spec:
+  selector:
+    app.kubernetes.io/name: mcp
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
