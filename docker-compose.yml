@@ -1,9 +1,9 @@
-# Local self-hosted stack: read-only MCP server, SonarQube + PostgreSQL, OWASP ZAP daemon,
-# and an on-demand scanner container (the same image Jenkins uses).
+# Local self-hosted stack: the read-only MCP server and an on-demand scanner container (the
+# same image Jenkins uses: Opengrep, OSV-Scanner, Trivy, Katana + Nuclei).
 #
-#   cp .env.example .env            # then fill in every secret
+#   cp .env.example .env            # then fill in MCP_AUTH_TOKEN
 #   mkdir -p security-reports
-#   docker compose up -d --build    # mcp, sonarqube, postgres, zap
+#   docker compose up -d --build mcp
 #   docker compose run --rm scanner devsecops-scan sast --target /workspace/src
 #
 # Secrets have no defaults on purpose: compose refuses to start until .env provides them.
@@ -61,97 +61,12 @@ services:
     environment:
       SCAN_WORKSPACE_ROOTS: /workspace
       REPORTS_DIR: /workspace/security-reports
-      SONAR_HOST_URL: http://sonarqube:9000
-      SONAR_TOKEN: ${SONAR_TOKEN:-}
-      ZAP_URL: http://zap:8080
-      ZAP_API_KEY: ${ZAP_API_KEY:?set ZAP_API_KEY in .env}
       TRIVY_CACHE_DIR: /var/cache/trivy
     volumes:
       - ${SCAN_SOURCE:-./test-samples}:/workspace/src:ro
       - ./security-reports:/workspace/security-reports
       - trivy-cache:/var/cache/trivy
     networks: [devsecops]
-
-  sonarqube:
-    image: sonarqube:26.9.0.129388-community
-    <<: *hardening
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonar
-      SONAR_JDBC_USERNAME: ${SONAR_DB_USER:-sonar}
-      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD:?set SONAR_DB_PASSWORD in .env}
-      # Local development only: skips the vm.max_map_count bootstrap check. On real hosts set
-      # vm.max_map_count=524288 and remove this (see deploy/k8s for the cluster equivalent).
-      SONAR_SEARCH_JAVAADDITIONALOPTS: "-Dnode.store.allow_mmap=false"
-    # Elasticsearch's bootstrap checks require at least 65535 open files.
-    ulimits:
-      nofile:
-        soft: 131072
-        hard: 131072
-      nproc: 8192
-    volumes:
-      - sonarqube-data:/opt/sonarqube/data
-      - sonarqube-extensions:/opt/sonarqube/extensions
-      - sonarqube-logs:/opt/sonarqube/logs
-    ports:
-      # UI is needed once to change the admin password and create the scanner token.
-      - "127.0.0.1:${SONAR_PORT:-9000}:9000"
-    networks: [devsecops]
-    restart: unless-stopped
-    healthcheck:
-      # The image ships neither curl nor wget, so the probe speaks HTTP over bash's /dev/tcp.
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /api/system/status HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"UP\"' <&3"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
-
-  postgres:
-    image: postgres:17.11
-    environment:
-      POSTGRES_USER: ${SONAR_DB_USER:-sonar}
-      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD:?set SONAR_DB_PASSWORD in .env}
-      POSTGRES_DB: sonar
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    networks: [devsecops]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d sonar"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  zap:
-    # Official ZAP image (the owasp/zap2docker-* images are retired). Override with ZAP_IMAGE.
-    image: ${ZAP_IMAGE:-ghcr.io/zaproxy/zaproxy:stable}
-    <<: *hardening
-    command:
-      - zap.sh
-      - -daemon
-      - -host
-      - 0.0.0.0
-      - -port
-      - "8080"
-      - -config
-      - api.key=${ZAP_API_KEY:?set ZAP_API_KEY in .env}
-      # Accept API calls from the compose network (the API key is still required).
-      - -config
-      - api.addrs.addr.name=.*
-      - -config
-      - api.addrs.addr.regex=true
-    networks: [devsecops]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fs -H \"X-ZAP-API-Key: $${ZAP_API_KEY}\" http://127.0.0.1:8080/JSON/core/view/version/ > /dev/null"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
-    environment:
-      ZAP_API_KEY: ${ZAP_API_KEY:?set ZAP_API_KEY in .env}
 
   # Deliberately vulnerable demo app for trying DAST: docker compose --profile demo up -d dast-target
   # then: docker compose run --rm scanner devsecops-scan dast --target http://dast-target:3001/
@@ -172,10 +87,6 @@ services:
       disable: true
 
 volumes:
-  sonarqube-data:
-  sonarqube-extensions:
-  sonarqube-logs:
-  postgres-data:
   trivy-cache:
 
 networks:

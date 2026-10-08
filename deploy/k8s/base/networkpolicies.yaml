@@ -1,8 +1,8 @@
-# Default deny, then open only the paths the architecture needs:
+# Default deny ingress, then open only what the architecture needs:
 #   MCP clients (namespaces labelled devsecops.io/mcp-client=true) -> mcp:3000
-#   scanner pods (label devsecops.io/scanner=true, any namespace)  -> sonarqube:9000, zap:8080
-#   sonarqube -> postgres:5432
-# Scanner pods (Jenkins agents, Jobs) need the devsecops.io/scanner=true label.
+# Scanners are short-lived Jenkins agents or Jobs: they need egress (rule/DB updates, DAST
+# targets) but no ingress. Restrict their egress in the namespace they run in, e.g. allow
+# only your staging CIDRs for DAST pods labelled devsecops.io/scanner=true.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -30,60 +30,3 @@ spec:
           protocol: TCP
   # The MCP server only reads the mounted volume: it needs no network egress at all.
   egress: []
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: sonarqube
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: sonarqube
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        - namespaceSelector: {}
-          podSelector:
-            matchLabels:
-              devsecops.io/scanner: "true"
-      ports:
-        - port: 9000
-          protocol: TCP
-    # Add a rule for your ingress controller's namespace to expose the SonarQube UI.
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: postgres
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: postgres
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: sonarqube
-      ports:
-        - port: 5432
-          protocol: TCP
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: zap
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: zap
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        - namespaceSelector: {}
-          podSelector:
-            matchLabels:
-              devsecops.io/scanner: "true"
-      ports:
-        - port: 8080
-          protocol: TCP

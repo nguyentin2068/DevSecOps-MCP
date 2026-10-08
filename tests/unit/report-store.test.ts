@@ -7,11 +7,11 @@ import { findings, scanResult, tempDir } from '../helpers';
 describe('ReportStore', () => {
   it('saves JSON and SARIF and reads them back', async () => {
     const store = new ReportStore(tempDir());
-    const result = scanResult({ scan_id: 'sast-semgrep-0001', findings: findings({ high: 1 }) });
+    const result = scanResult({ scan_id: 'sast-opengrep-0001', findings: findings({ high: 1 }) });
     const dir = await store.save(result);
     expect(existsSync(path.join(dir, 'result.json'))).toBe(true);
     expect(JSON.parse(readFileSync(path.join(dir, 'result.sarif'), 'utf8')).version).toBe('2.1.0');
-    await expect(store.get('sast-semgrep-0001')).resolves.toMatchObject({ scan_id: 'sast-semgrep-0001', summary: { high: 1 } });
+    await expect(store.get('sast-opengrep-0001')).resolves.toMatchObject({ scan_id: 'sast-opengrep-0001', summary: { high: 1 } });
   });
 
   it('refuses to overwrite an existing scan id', async () => {
@@ -57,6 +57,6 @@ describe('ReportStore', () => {
   });
 
   it('generates ids that pass validation', () => {
-    expect(assertScanId(newScanId('dast', 'zap'))).toMatch(/^dast-zap-\d{8}t\d{6}-[0-9a-f]{6}$/);
+    expect(assertScanId(newScanId('dast', 'nuclei'))).toMatch(/^dast-nuclei-\d{8}t\d{6}-[0-9a-f]{6}$/);
   });
 });

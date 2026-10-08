@@ -1,7 +1,7 @@
 {
   "name": "devsecops-mcp-server",
   "version": "2.0.0",
-  "description": "Self-hosted DevSecOps scan runner for Jenkins (Semgrep, SonarQube, OSV-Scanner, Trivy, OWASP ZAP) with a read-only MCP server for AI triage",
+  "description": "Self-hosted DevSecOps scan runner for Jenkins (Opengrep, OSV-Scanner, Trivy, Katana + Nuclei) with a read-only MCP server for AI triage",
   "main": "dist/src/mcp/server.js",
   "bin": {
     "devsecops-scan": "dist/src/cli.js"
@@ -24,11 +24,11 @@
     "sast",
     "dast",
     "sca",
-    "sonarqube",
-    "zap",
+    "opengrep",
     "osv-scanner",
     "trivy",
-    "semgrep",
+    "nuclei",
+    "katana",
     "jenkins",
     "kubernetes"
   ],

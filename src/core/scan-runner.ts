@@ -1,36 +1,32 @@
-import path from 'path';
-import { envSecret, SecurityRules } from './config';
+import { resolveConfigPath, SecurityRules } from './config';
 import {
   assertSafeDastTarget,
   resolveWorkspacePath,
   Resolver,
   validateImageRef,
-  validateProjectKey,
   ValidationError,
   workspaceRootsFromEnv
 } from './guards';
 import { errorMessage, logger } from './logger';
 import { evaluatePolicy, PolicyDecision } from './policy';
 import { assertScanId, newScanId, ReportStore } from './report-store';
+import { runKatana } from './scanners/katana';
+import { runNuclei } from './scanners/nuclei';
+import { runOpengrep } from './scanners/opengrep';
 import { runOsvScanner } from './scanners/osv-scanner';
-import { runSemgrep } from './scanners/semgrep';
-import { runSonarQube } from './scanners/sonarqube';
 import { runTrivyFilesystem, runTrivyImage } from './scanners/trivy';
-import { runZap } from './scanners/zap';
 import { emptySummary, ScannerOutput, ScanResult, ScanType, summarize, TOOLS_BY_SCAN_TYPE } from './types';
 
-/** Semgrep registry references (p/..., r/..., s/...), URLs and "auto" are passed through unchanged. */
-const REGISTRY_CONFIG = /^(?:[prs]\/|https?:\/\/|auto$)/;
+/** Registry references (p/..., r/..., s/...) and URLs are passed to Opengrep unchanged. */
+const REGISTRY_CONFIG = /^(?:[prs]\/|https?:\/\/)/;
 
 export interface ScanRequest {
   scanType: ScanType;
   target: string;
   tool?: string;
   scanId?: string;
-  /** SonarQube project key (sast/sonarqube only). */
-  projectKey?: string;
-  /** Overrides dast.zap.mode from the rules. */
-  zapMode?: 'baseline' | 'full';
+  /** Overrides dast.mode from the rules (full adds the nuclei fuzzing pass). */
+  dastMode?: 'baseline' | 'full';
 }
 
 export interface ScanContext {
@@ -64,19 +60,47 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
 
   if (request.scanType === 'dast') {
     const url = await assertSafeDastTarget(request.target, rules.dast.target_policy, ctx.resolver);
-    const zap = rules.dast.zap;
+    const { crawl, nuclei } = rules.dast;
+    const templates = nuclei.templates.map((entry) => resolveConfigPath(entry, rules, env));
     return {
       target: url.toString(),
-      run: () =>
-        runZap(url.toString(), {
-          baseUrl: env['ZAP_URL'] || 'http://localhost:8080',
-          apiKey: envSecret('ZAP_API_KEY', env) ?? '',
-          mode: request.zapMode ?? zap.mode,
-          spiderMaxMinutes: zap.spider_max_minutes,
-          passiveWaitMinutes: zap.passive_wait_minutes,
-          activeMaxMinutes: zap.active_max_minutes,
-          maxAlerts: zap.max_alerts
-        })
+      run: async () => {
+        const mode = request.dastMode ?? rules.dast.mode;
+        // full: crawl (same-origin URLs only) to find parameters for the fuzzing pass.
+        const crawled =
+          mode === 'full' && crawl.enabled
+            ? await runKatana(url, {
+                bin: env['KATANA_PATH'] || 'katana',
+                maxDepth: crawl.max_depth,
+                maxDurationSeconds: crawl.max_duration_seconds,
+                maxUrls: crawl.max_urls,
+                jsCrawl: crawl.js_crawl,
+                rateLimit: nuclei.rate_limit,
+                requestTimeoutSeconds: nuclei.request_timeout_seconds,
+                env
+              })
+            : [];
+        const output = await runNuclei(
+          { templateTargets: [url.toString()], fuzzTargets: mode === 'full' ? (crawled.length ? crawled : [url.toString()]) : [] },
+          {
+            bin: env['NUCLEI_PATH'] || 'nuclei',
+            templates,
+            severities: nuclei.severities,
+            includeTags: nuclei.include_tags,
+            excludeTags: nuclei.exclude_tags,
+            excludeTemplateIds: nuclei.exclude_template_ids,
+            rateLimit: nuclei.rate_limit,
+            concurrency: nuclei.concurrency,
+            requestTimeoutSeconds: nuclei.request_timeout_seconds,
+            timeoutSeconds: nuclei.timeout_seconds,
+            env
+          }
+        );
+        return {
+          findings: output.findings,
+          metadata: { ...output.metadata, mode: request.dastMode ?? rules.dast.mode, crawled_urls: crawled.length }
+        };
+      }
     };
   }
 
@@ -98,36 +122,20 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
 
   const target = await resolveWorkspacePath(request.target, ctx.workspaceRoots ?? workspaceRootsFromEnv(env));
 
-  if (request.scanType === 'sast' && tool === 'semgrep') {
-    const semgrep = rules.sast.semgrep;
-    // Semgrep runs with cwd=target, so local rule paths are resolved against the caller's cwd first.
-    const configs = semgrep.configs.map((config) => (REGISTRY_CONFIG.test(config) ? config : path.resolve(config)));
+  if (request.scanType === 'sast') {
+    const opengrep = rules.sast.opengrep;
+    // Opengrep runs with cwd=target, so local rule paths are made absolute here, relative to the rules file.
+    const configs = opengrep.configs.map((config) => (REGISTRY_CONFIG.test(config) ? config : resolveConfigPath(config, rules, env)));
     return {
       target,
       run: () =>
-        runSemgrep(target, {
-          bin: env['SEMGREP_PATH'] || 'semgrep',
+        runOpengrep(target, {
+          bin: env['OPENGREP_PATH'] || 'opengrep',
           configs,
-          exclude: semgrep.exclude,
-          timeoutSeconds: semgrep.timeout_seconds
-        })
-    };
-  }
-
-  if (request.scanType === 'sast' && tool === 'sonarqube') {
-    if (!request.projectKey) throw new ValidationError('--project-key is required for SonarQube scans');
-    const projectKey = validateProjectKey(request.projectKey);
-    const sonar = rules.sast.sonarqube;
-    return {
-      target,
-      run: () =>
-        runSonarQube(target, {
-          scannerBin: env['SONAR_SCANNER_PATH'] || 'sonar-scanner',
-          hostUrl: env['SONAR_HOST_URL'] || 'http://localhost:9000',
-          token: envSecret('SONAR_TOKEN', env) ?? '',
-          projectKey,
-          exclusions: sonar.exclusions,
-          timeoutSeconds: sonar.timeout_seconds
+          exclude: opengrep.exclude,
+          timeoutSeconds: opengrep.timeout_seconds,
+          taintIntrafile: opengrep.taint_intrafile,
+          env
         })
     };
   }

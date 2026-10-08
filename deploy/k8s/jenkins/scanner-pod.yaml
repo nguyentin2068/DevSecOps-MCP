@@ -1,7 +1,7 @@
 # Pod template for the Jenkins Kubernetes plugin. In the Jenkinsfile use:
 #   agent { kubernetes { yamlFile 'deploy/k8s/jenkins/scanner-pod.yaml'; defaultContainer 'scanner' } }
-# The plugin adds the jnlp container. The label lets the NetworkPolicies admit this pod to
-# SonarQube and ZAP.
+# The plugin adds the jnlp container. The label lets you target scanner pods with egress
+# NetworkPolicies (for example, allow DAST traffic only to staging CIDRs).
 apiVersion: v1
 kind: Pod
 metadata:

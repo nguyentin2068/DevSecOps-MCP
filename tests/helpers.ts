@@ -37,7 +37,7 @@ export function scanResult(overrides: Partial<ScanResult> & { findings?: Finding
     schema_version: 1,
     scan_id: overrides.scan_id ?? `${scanType}-test-0001`,
     scan_type: scanType,
-    tool: overrides.tool ?? 'semgrep',
+    tool: overrides.tool ?? 'opengrep',
     status: overrides.status ?? 'completed',
     target: overrides.target ?? '/workspace',
     started_at: '2026-01-01T00:00:00.000Z',
