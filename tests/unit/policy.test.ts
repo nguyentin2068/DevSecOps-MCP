@@ -24,23 +24,35 @@ describe('evaluatePolicy', () => {
   });
 
   it('allows medium findings up to the threshold and fails above it', () => {
-    // sast.thresholds.medium is 5 in the default rules
-    expect(evaluatePolicy([scanResult({ findings: findings({ medium: 5 }) })], rules).status).toBe('PASS');
-    const decision = evaluatePolicy([scanResult({ findings: findings({ medium: 6 }) })], rules);
+    // sca.thresholds.medium is 3 in the default rules
+    const sca = (count: number) => scanResult({ scan_type: 'sca', tool: 'trivy', findings: findings({ medium: count }) });
+    expect(evaluatePolicy([sca(3)], rules).status).toBe('PASS');
+    const decision = evaluatePolicy([sca(4)], rules);
     expect(decision.status).toBe('FAIL');
-    expect(decision.reasons.join('\n')).toMatch(/medium: 6 finding\(s\) exceed the threshold of 5/);
+    expect(decision.reasons.join('\n')).toMatch(/medium: 4 finding\(s\) exceed the threshold of 3/);
   });
 
   it('inherits global thresholds the scan type does not set', () => {
-    // sast sets no low threshold; global_policy.thresholds.low is 20
-    expect(evaluatePolicy([scanResult({ findings: findings({ low: 20 }) })], rules).status).toBe('PASS');
-    expect(evaluatePolicy([scanResult({ findings: findings({ low: 21 }) })], rules).status).toBe('FAIL');
+    // dast sets no low threshold; global_policy.thresholds.low is 20
+    const dast = (count: number) => scanResult({ scan_type: 'dast', tool: 'nuclei', findings: findings({ low: count }) });
+    expect(evaluatePolicy([dast(20)], rules).status).toBe('PASS');
+    expect(evaluatePolicy([dast(21)], rules).status).toBe('FAIL');
   });
 
-  it('applies per-scan-type thresholds', () => {
-    // sca.thresholds.medium is 3, stricter than sast
-    const sca = scanResult({ scan_type: 'sca', tool: 'trivy', findings: findings({ medium: 4 }) });
-    expect(evaluatePolicy([sca], rules).status).toBe('FAIL');
+  it('reports but does not gate medium and low SAST findings by default', () => {
+    // sast sets medium/low to null, overriding the global 5/20: opengrep-rules is noisy
+    const decision = evaluatePolicy([scanResult({ findings: findings({ medium: 50, low: 100 }) })], rules);
+    expect(decision.status).toBe('PASS');
+    expect(decision.scans[0]?.counts).toMatchObject({ medium: 50, low: 100 });
+    expect(evaluatePolicy([scanResult({ findings: findings({ high: 1, medium: 50 }) })], rules).status).toBe('FAIL');
+  });
+
+  it('fails DAST on any medium finding (e.g. reflected XSS) but never on info', () => {
+    const dast = (counts: Parameters<typeof findings>[0]) => scanResult({ scan_type: 'dast', tool: 'nuclei', findings: findings(counts) });
+    expect(evaluatePolicy([dast({ info: 40 })], rules).status).toBe('PASS');
+    const decision = evaluatePolicy([dast({ medium: 1, info: 40 })], rules);
+    expect(decision.status).toBe('FAIL');
+    expect(decision.reasons.join('\n')).toMatch(/medium: 1 finding\(s\) exceed the threshold of 0/);
   });
 
   it('treats a null threshold as unlimited', () => {

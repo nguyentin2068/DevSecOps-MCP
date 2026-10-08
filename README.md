@@ -126,11 +126,12 @@ global_policy:
   enforcement_level: strict      # permissive = report violations as WARN, exit 0
   thresholds: { critical: 0, high: 0, medium: 5, low: 20 }   # omit or null = unlimited
 sast:
-  thresholds: { critical: 0, high: 0, medium: 5 }            # overrides global per severity
+  thresholds: { critical: 0, high: 0, medium: null, low: null }   # overrides global; null = report only
   opengrep:
     taint_intrafile: true
     configs: [opengrep/baseline.yml, "${OPENGREP_RULES_DIR}/python", ...]
 dast:
+  thresholds: { critical: 0, high: 0, medium: 0 }            # reflected XSS / open redirect are medium
   mode: baseline
   crawl: { enabled: true, max_depth: 3, max_duration_seconds: 300, max_urls: 500 }
   nuclei: { exclude_tags: [dos, intrusive], rate_limit: 50 }
@@ -148,7 +149,11 @@ The gate fails when any of the following is true:
 - no results were given;
 - the data is incomplete or inconsistent (for example, a summary that under-counts its findings).
 
-**Tuning:** opengrep-rules is broad. On a typical codebase it reports medium-severity findings that are often false positives (for example `path-join-resolve-traversal` on guarded code). Start with `enforcement_level: permissive` or a higher `sast.thresholds.medium`, then trim `configs` to the languages you use.
+**Default thresholds and tuning:**
+
+- **SAST:** only `critical` and `high` gate the build. opengrep-rules is broad and on a typical codebase reports many medium/low findings that are false positives (for example `path-join-resolve-traversal` on guarded code), so `medium` and `low` are `null`: recorded in the reports and SARIF, not enforced. Trim `configs` to the languages you use, suppress reviewed findings inline (`// nosemgrep: <rule-id>`), then set `medium` to a number to start enforcing it.
+- **DAST:** Nuclei rates confirmed reflected XSS and open redirects as `medium`, so `medium: 0` fails the build on them. `info` findings (technology fingerprints, missing headers) are never gated.
+- **SCA and container:** unchanged (`critical`/`high` at 0; SCA allows up to 3 medium and 10 low).
 
 ## Jenkins
 

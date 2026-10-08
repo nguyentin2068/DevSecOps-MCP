@@ -20,10 +20,15 @@ global_policy:
 # Static analysis of source code (Opengrep, an LGPL fork of Semgrep CE).
 sast:
   default_tool: opengrep
+  # opengrep-rules is broad and reports many medium/low findings that are false positives on
+  # ordinary code (e.g. path-join-resolve-traversal). They are recorded in the reports and
+  # SARIF but do not gate the build (null = unlimited). Once the rule set is tuned for your
+  # codebase, set medium to a number to start enforcing it.
   thresholds:
     critical: 0
     high: 0
-    medium: 5
+    medium: null
+    low: null
   opengrep:
     timeout_seconds: 900
     # Track tainted data across functions within a file (--taint-intrafile).
@@ -77,10 +82,12 @@ container:
 # Dynamic analysis of a running application: katana crawls, nuclei runs templates.
 dast:
   default_tool: nuclei
+  # Nuclei rates confirmed reflected XSS and open redirects as medium, so medium findings fail
+  # the gate. Info findings (tech fingerprints, missing headers) are never gated.
   thresholds:
     critical: 0
     high: 0
-    medium: 10
+    medium: 0
   # baseline: nuclei HTTP templates against the target URL (known CVEs, misconfigurations,
   #           exposures). No crawl: templates build their own paths from the base URL.
   # full:     baseline + katana crawl + nuclei's DAST fuzzing templates on crawled URLs that
