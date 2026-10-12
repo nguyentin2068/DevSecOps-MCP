@@ -1,431 +1,196 @@
-import { jest } from '@jest/globals';
-import { DevSecOpsMCPServer } from '../../src/mcp/server';
+import { Server as HttpServer } from 'http';
+import { AddressInfo } from 'net';
+import { mkdirSync, symlinkSync, writeFileSync } from 'fs';
+import path from 'path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { ReportStore } from '../../src/core/report-store';
+import { createHttpApp } from '../../src/mcp/http';
+import { ToolContext } from '../../src/mcp/tools';
+import { findings, loadDefaultRules, scanResult, tempDir } from '../helpers';
 
-// Mock all tools
-jest.mock('../../src/mcp/tools/sast-tool');
-jest.mock('../../src/mcp/tools/dast-tool');
-jest.mock('../../src/mcp/tools/sca-tool');
-jest.mock('../../src/mcp/tools/iast-tool');
+const TOKEN = 'test-token-0123456789abcdef0123456789';
 
-describe('DevSecOpsMCPServer Integration', () => {
-  let server: DevSecOpsMCPServer;
+type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 
-  beforeEach(() => {
-    server = new DevSecOpsMCPServer();
+describe('MCP server over Streamable HTTP', () => {
+  let http: HttpServer;
+  let baseUrl: string;
+  let ctx: ToolContext;
+
+  beforeAll(async () => {
+    const reportsDir = tempDir('mcp-reports-');
+    const store = new ReportStore(reportsDir);
+    await store.save(scanResult({ scan_id: 'sast-semgrep-0001', finished_at: '2026-01-01T00:00:00Z', findings: findings({ high: 2, low: 3 }) }));
+    await store.save(scanResult({ scan_id: 'sca-trivy-0001', scan_type: 'sca', tool: 'trivy', finished_at: '2026-01-02T00:00:00Z' }));
+
+    // A planted symlink to a file outside the reports dir must not be readable through the API.
+    const outside = tempDir('outside-');
+    writeFileSync(path.join(outside, 'result.json'), JSON.stringify(scanResult({ scan_id: 'sast-leak-0001' })));
+    symlinkSync(outside, path.join(reportsDir, 'sast-leak-0001'));
+    mkdirSync(path.join(reportsDir, 'not-a-scan'));
+
+    ctx = { store, rules: loadDefaultRules(), maxResponseBytes: 1024 * 1024 };
+    const app = createHttpApp(ctx, { token: TOKEN });
+    await new Promise<void>((resolve) => {
+      http = app.listen(0, '127.0.0.1', () => resolve());
+    });
+    baseUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   });
 
-  describe('MCP Protocol Compliance', () => {
-    it('should list all available tools', async () => {
-      const mockListTools = jest.fn().mockResolvedValue({
-        tools: [
-          {
-            name: 'run_sast_scan',
-            description: 'Execute SAST (Static Application Security Testing) scan'
-          },
-          {
-            name: 'run_dast_scan',
-            description: 'Execute DAST (Dynamic Application Security Testing) scan'
-          },
-          {
-            name: 'run_sca_scan',
-            description: 'Execute SCA (Software Composition Analysis) scan'
-          },
-          {
-            name: 'run_iast_scan',
-            description: 'Execute IAST (Interactive Application Security Testing) scan'
-          }
-        ]
-      });
-
-      // Mock the server's request handler
-      (server as any).server.setRequestHandler = jest.fn();
-      (server as any).server.listTools = mockListTools;
-
-      const tools = await mockListTools();
-
-      expect(tools.tools).toHaveLength(6); // 4 scan tools + 2 utility tools
-      expect(tools.tools.map((t: any) => t.name)).toContain('run_sast_scan');
-      expect(tools.tools.map((t: any) => t.name)).toContain('run_dast_scan');
-      expect(tools.tools.map((t: any) => t.name)).toContain('run_sca_scan');
-      expect(tools.tools.map((t: any) => t.name)).toContain('run_iast_scan');
-    });
-
-    it('should validate tool input schemas', async () => {
-      const sastTool = {
-        name: 'run_sast_scan',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            target: { type: 'string' },
-            rules: { type: 'array' },
-            severity_threshold: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] }
-          },
-          required: ['target']
-        }
-      };
-
-      expect(sastTool.inputSchema.properties.target).toBeDefined();
-      expect(sastTool.inputSchema.required).toContain('target');
-      expect(sastTool.inputSchema.properties.severity_threshold.enum).toContain('critical');
-    });
+  afterAll(async () => {
+    await new Promise((resolve) => http.close(resolve));
   });
 
-  describe('Tool Execution', () => {
-    it('should execute SAST scan tool', async () => {
-      const mockSASTTool = {
-        executeScan: jest.fn().mockResolvedValue({
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              tool: 'Semgrep',
-              status: 'completed',
-              vulnerabilities: [],
-              summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0 }
-            })
-          }]
-        })
-      };
-
-      (server as any).sastTool = mockSASTTool;
-
-      const result = await mockSASTTool.executeScan({
-        target: '/test/project'
-      });
-
-      expect(mockSASTTool.executeScan).toHaveBeenCalledWith({
-        target: '/test/project'
-      });
-      expect(result.content[0].type).toBe('text');
-      
-      const scanResult = JSON.parse(result.content[0].text);
-      expect(scanResult.tool).toBe('Semgrep');
-      expect(scanResult.status).toBe('completed');
+  async function connect(token = TOKEN): Promise<Client> {
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } }
     });
+    await client.connect(transport);
+    return client;
+  }
 
-    it('should execute DAST scan tool', async () => {
-      const mockDASTTool = {
-        executeScan: jest.fn().mockResolvedValue({
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              tool: 'OWASP ZAP',
-              status: 'completed',
-              target_url: 'https://example.com',
-              vulnerabilities: [],
-              coverage: { urls_tested: 10 }
-            })
-          }]
-        })
-      };
+  async function call(client: Client, name: string, args: Record<string, unknown>): Promise<unknown> {
+    const result = (await client.callTool({ name, arguments: args })) as ToolResult;
+    const first = result.content[0];
+    if (!first) throw new Error('empty tool result');
+    try {
+      return JSON.parse(first.text);
+    } catch {
+      return first.text;
+    }
+  }
 
-      (server as any).dastTool = mockDASTTool;
-
-      const result = await mockDASTTool.executeScan({
-        target_url: 'https://example.com',
-        scan_type: 'baseline'
-      });
-
-      expect(mockDASTTool.executeScan).toHaveBeenCalledWith({
-        target_url: 'https://example.com',
-        scan_type: 'baseline'
-      });
-      
-      const scanResult = JSON.parse(result.content[0].text);
-      expect(scanResult.tool).toBe('OWASP ZAP');
-      expect(scanResult.target_url).toBe('https://example.com');
-    });
-
-    it('should execute SCA scan tool', async () => {
-      const mockSCATool = {
-        executeScan: jest.fn().mockResolvedValue({
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              tool: 'Snyk',
-              status: 'completed',
-              project_path: '/test/project',
-              vulnerabilities: [],
-              license_issues: [],
-              summary: { total_vulnerabilities: 0, license_violations: 0 }
-            })
-          }]
-        })
-      };
-
-      (server as any).scaTool = mockSCATool;
-
-      const result = await mockSCATool.executeScan({
-        project_path: '/test/project',
-        package_manager: 'npm'
-      });
-
-      expect(mockSCATool.executeScan).toHaveBeenCalledWith({
-        project_path: '/test/project',
-        package_manager: 'npm'
-      });
-      
-      const scanResult = JSON.parse(result.content[0].text);
-      expect(scanResult.tool).toBe('Snyk');
-      expect(scanResult.project_path).toBe('/test/project');
-    });
-
-    it('should execute IAST scan tool', async () => {
-      const mockIASTTool = {
-        executeScan: jest.fn().mockResolvedValue({
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              tool: 'Veracode IAST',
-              status: 'completed',
-              application_id: 'test-app-123',
-              vulnerabilities: [],
-              performance_metrics: { agent_overhead: 2.5 },
-              coverage: { coverage_percentage: 75 }
-            })
-          }]
-        })
-      };
-
-      (server as any).iastTool = mockIASTTool;
-
-      const result = await mockIASTTool.executeScan({
-        application_id: 'test-app-123',
-        environment: 'staging'
-      });
-
-      expect(mockIASTTool.executeScan).toHaveBeenCalledWith({
-        application_id: 'test-app-123',
-        environment: 'staging'
-      });
-      
-      const scanResult = JSON.parse(result.content[0].text);
-      expect(scanResult.tool).toBe('Veracode IAST');
-      expect(scanResult.application_id).toBe('test-app-123');
-    });
+  it('serves an unauthenticated health check without internal details', async () => {
+    const response = await fetch(`${baseUrl}/health`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: 'ok' });
+    expect(response.headers.get('x-powered-by')).toBeNull();
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
   });
 
-  describe('Security Report Generation', () => {
-    it('should generate comprehensive security report', async () => {
-      const mockGenerateReport = jest.fn().mockResolvedValue({
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            success: true,
-            message: 'Security report generation initiated',
-            format: 'json',
-            include_remediation: true
-          })
-        }]
-      });
+  it.each([
+    ['no token', {}],
+    ['wrong token', { Authorization: 'Bearer wrong-token' }],
+    ['wrong scheme', { Authorization: `Basic ${TOKEN}` }]
+  ])('returns 401 with %s', async (_label, headers) => {
+    const response = await fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...headers },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+    });
+    expect(response.status).toBe(401);
+    expect(response.headers.get('www-authenticate')).toMatch(/^Bearer/);
+  });
 
-      const result = await mockGenerateReport({
-        scan_ids: ['sast-123', 'dast-456', 'sca-789'],
-        format: 'json',
-        include_remediation: true
-      });
+  it('rejects the MCP client when the token is wrong', async () => {
+    await expect(connect('wrong-token')).rejects.toThrow();
+  });
 
-      expect(result.content[0].type).toBe('text');
-      
-      const reportResult = JSON.parse(result.content[0].text);
-      expect(reportResult.success).toBe(true);
-      expect(reportResult.format).toBe('json');
-      expect(reportResult.include_remediation).toBe(true);
+  it('refuses GET on the MCP endpoint (stateless, no server-initiated streams)', async () => {
+    const response = await fetch(`${baseUrl}/mcp`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(response.status).toBe(405);
+  });
+
+  it('refuses short tokens at startup', () => {
+    expect(() => createHttpApp(ctx, { token: 'short' })).toThrow(/at least 32/);
+  });
+
+  describe('with a valid token', () => {
+    let client: Client;
+
+    beforeAll(async () => {
+      client = await connect();
     });
 
-    it('should support multiple report formats', async () => {
-      const formats = ['json', 'html', 'pdf', 'sarif'];
-      
-      for (const format of formats) {
-        const mockGenerateReport = jest.fn().mockResolvedValue({
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              success: true,
-              format: format
-            })
-          }]
-        });
+    afterAll(async () => {
+      await client.close();
+    });
 
-        const result = await mockGenerateReport({
-          scan_ids: ['test-123'],
-          format: format
-        });
+    it('exposes only read-only tools', async () => {
+      const { tools } = await client.listTools();
+      expect(tools.map((tool) => tool.name).sort()).toEqual([
+        'generate_security_report',
+        'get_scan_result',
+        'list_scans',
+        'summarize_findings',
+        'validate_security_policy'
+      ]);
+      expect(tools.some((tool) => tool.name.startsWith('run_'))).toBe(false);
+    });
 
-        const reportResult = JSON.parse(result.content[0].text);
-        expect(reportResult.format).toBe(format);
+    it('lists stored scans newest first and ignores non-scan directories', async () => {
+      const scans = (await call(client, 'list_scans', {})) as Array<{ scan_id: string }>;
+      expect(scans.map((scan) => scan.scan_id)).toEqual(['sca-trivy-0001', 'sast-semgrep-0001']);
+      const sast = (await call(client, 'list_scans', { scan_type: 'sast' })) as unknown[];
+      expect(sast).toHaveLength(1);
+    });
+
+    it('reads a scan result with severity filtering and pagination', async () => {
+      const result = (await call(client, 'get_scan_result', { scan_id: 'sast-semgrep-0001', min_severity: 'high' })) as {
+        findings: Array<{ severity: string }>;
+        pagination: { matching: number; total: number };
+      };
+      expect(result.findings.map((f) => f.severity)).toEqual(['high', 'high']);
+      expect(result.pagination).toMatchObject({ matching: 2, total: 5 });
+
+      const page = (await call(client, 'get_scan_result', { scan_id: 'sast-semgrep-0001', offset: 4, limit: 10 })) as {
+        findings: unknown[];
+      };
+      expect(page.findings).toHaveLength(1);
+    });
+
+    it.each(['../../etc/passwd', '..%2F..%2Fetc', 'sast-leak-0001', '/etc/passwd', 'not-a-scan'])(
+      'refuses to read %s',
+      async (scanId) => {
+        await expect(client.callTool({ name: 'get_scan_result', arguments: { scan_id: scanId } })).rejects.toThrow(
+          /Invalid scan id|not found|Invalid arguments/
+        );
       }
-    });
-  });
+    );
 
-  describe('Security Policy Validation', () => {
-    it('should validate security policy compliance', async () => {
-      const mockValidatePolicy = jest.fn().mockResolvedValue({
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            success: true,
-            message: 'Security policy validation completed',
-            policy_file: '/security/policy.yml',
-            compliance_status: 'PASSED'
-          })
-        }]
-      });
-
-      const result = await mockValidatePolicy({
-        policy_file: '/security/policy.yml',
-        scan_results: ['sast-123', 'sca-456']
-      });
-
-      expect(result.content[0].type).toBe('text');
-      
-      const validationResult = JSON.parse(result.content[0].text);
-      expect(validationResult.success).toBe(true);
-      expect(validationResult.compliance_status).toBe('PASSED');
-    });
-  });
-
-  describe('Error Handling', () => {
-    it('should handle tool execution failures gracefully', async () => {
-      const mockFailingTool = {
-        executeScan: jest.fn().mockRejectedValue(new Error('Tool execution failed'))
+    it('summarizes findings for triage with the policy decision', async () => {
+      const digest = (await call(client, 'summarize_findings', { scan_ids: ['sast-semgrep-0001'] })) as {
+        policy: { status: string };
+        totals: { high: number; low: number };
+        groups: Array<{ rule_id: string; count: number }>;
       };
-
-      (server as any).sastTool = mockFailingTool;
-
-      try {
-        await mockFailingTool.executeScan({ target: '/test' });
-      } catch (error) {
-        expect(error).toBeInstanceOf(Error);
-        expect((error as Error).message).toBe('Tool execution failed');
-      }
+      expect(digest.policy.status).toBe('FAIL');
+      expect(digest.totals).toMatchObject({ high: 2, low: 3 });
+      expect(digest.groups[0]).toMatchObject({ rule_id: 'rule-high', count: 2 });
     });
 
-    it('should handle invalid tool names', async () => {
-      const mockCallTool = jest.fn().mockImplementation((toolName) => {
-        if (toolName === 'invalid_tool') {
-          throw new Error('Tool not found: invalid_tool');
-        }
-        return { success: true };
-      });
-
-      expect(() => mockCallTool('invalid_tool')).toThrow('Tool not found: invalid_tool');
+    it('validates the policy against stored results', async () => {
+      const pass = (await call(client, 'validate_security_policy', { scan_ids: ['sca-trivy-0001'] })) as { status: string };
+      expect(pass.status).toBe('PASS');
+      const fail = (await call(client, 'validate_security_policy', { scan_ids: ['sast-semgrep-0001', 'sca-trivy-0001'] })) as {
+        status: string;
+        reasons: string[];
+      };
+      expect(fail.status).toBe('FAIL');
+      expect(fail.reasons.join('\n')).toMatch(/high: 2/);
     });
 
-    it('should validate input parameters', async () => {
-      const mockSASTTool = {
-        executeScan: jest.fn().mockResolvedValue({
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              success: false,
-              error: 'SAST scan failed',
-              message: 'Invalid parameters: "target" is required',
-              code: 'SAST_SCAN_ERROR'
-            })
-          }]
-        })
+    it('generates markdown, json and sarif reports', async () => {
+      const markdown = (await call(client, 'generate_security_report', { scan_ids: ['sast-semgrep-0001'] })) as string;
+      expect(markdown).toMatch(/^# Security Scan Report/);
+      const json = (await call(client, 'generate_security_report', { scan_ids: ['sast-semgrep-0001'], format: 'json' })) as {
+        policy: { status: string };
       };
-
-      (server as any).sastTool = mockSASTTool;
-
-      const result = await mockSASTTool.executeScan({});
-      const scanResult = JSON.parse(result.content[0].text);
-
-      expect(scanResult.success).toBe(false);
-      expect(scanResult.message).toContain('target');
+      expect(json.policy.status).toBe('FAIL');
+      const sarif = (await call(client, 'generate_security_report', { scan_ids: ['sast-semgrep-0001', 'sca-trivy-0001'], format: 'sarif' })) as {
+        runs: unknown[];
+      };
+      expect(sarif.runs).toHaveLength(2);
     });
-  });
 
-  describe('Concurrent Scan Execution', () => {
-    it('should handle multiple concurrent scans', async () => {
-      const mockSASTTool = {
-        executeScan: jest.fn().mockResolvedValue({
-          content: [{ type: 'text', text: JSON.stringify({ status: 'completed' }) }]
-        })
-      };
-
-      const mockSCATool = {
-        executeScan: jest.fn().mockResolvedValue({
-          content: [{ type: 'text', text: JSON.stringify({ status: 'completed' }) }]
-        })
-      };
-
-      (server as any).sastTool = mockSASTTool;
-      (server as any).scaTool = mockSCATool;
-
-      const promises = [
-        mockSASTTool.executeScan({ target: '/test/project1' }),
-        mockSCATool.executeScan({ project_path: '/test/project1' }),
-        mockSASTTool.executeScan({ target: '/test/project2' }),
-        mockSCATool.executeScan({ project_path: '/test/project2' })
-      ];
-
-      const results = await Promise.all(promises);
-
-      expect(results).toHaveLength(4);
-      results.forEach(result => {
-        const scanResult = JSON.parse(result.content[0].text);
-        expect(scanResult.status).toBe('completed');
-      });
-    });
-  });
-
-  describe('Logging and Monitoring', () => {
-    it('should log scan execution events', async () => {
-      const mockLogger = {
-        info: jest.fn(),
-        warn: jest.fn(),
-        error: jest.fn(),
-        debug: jest.fn()
-      };
-
-      // Mock winston logger
-      jest.doMock('winston', () => ({
-        createLogger: jest.fn(() => mockLogger)
-      }));
-
-      const mockSASTTool = {
-        executeScan: jest.fn().mockResolvedValue({
-          content: [{ type: 'text', text: JSON.stringify({ status: 'completed' }) }]
-        })
-      };
-
-      (server as any).sastTool = mockSASTTool;
-
-      await mockSASTTool.executeScan({ target: '/test/project' });
-
-      // Verify logging calls would be made
-      expect(mockSASTTool.executeScan).toHaveBeenCalled();
-    });
-  });
-
-  describe('Performance Metrics', () => {
-    it('should track scan execution time', async () => {
-      const startTime = Date.now();
-
-      const mockSASTTool = {
-        executeScan: jest.fn().mockImplementation(async () => {
-          await new Promise(resolve => setTimeout(resolve, 100)); // Simulate work
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                status: 'completed',
-                metadata: {
-                  scan_duration: Date.now() - startTime
-                }
-              })
-            }]
-          };
-        })
-      };
-
-      (server as any).sastTool = mockSASTTool;
-
-      const result = await mockSASTTool.executeScan({ target: '/test/project' });
-      const scanResult = JSON.parse(result.content[0].text);
-
-      expect(scanResult.metadata.scan_duration).toBeGreaterThan(0);
+    it('rejects unknown tools, scan-triggering tools and unexpected arguments', async () => {
+      await expect(client.callTool({ name: 'run_sast_scan', arguments: { target: '/' } })).rejects.toThrow(/Unknown tool/);
+      await expect(
+        client.callTool({ name: 'validate_security_policy', arguments: { scan_ids: ['sast-semgrep-0001'], policy_file: '/etc/passwd' } })
+      ).rejects.toThrow(/not allowed/);
+      await expect(client.callTool({ name: 'list_scans', arguments: { limit: 100000 } })).rejects.toThrow(/Invalid arguments/);
     });
   });
 });

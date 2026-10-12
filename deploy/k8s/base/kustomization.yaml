@@ -1,0 +1,24 @@
+# kubectl apply -k deploy/k8s/base   (after creating the devsecops-secrets Secret, see README)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: devsecops
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: devsecops
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - security-reports-pvc.yaml
+  - mcp.yaml
+  - postgres.yaml
+  - sonarqube.yaml
+  - zap.yaml
+  - networkpolicies.yaml
+
+# Point these at your registry (images built with: docker build --target mcp|scanner).
+images:
+  - name: devsecops-mcp
+    newName: registry.example.com/devsecops-mcp
+    newTag: "2.0.0"

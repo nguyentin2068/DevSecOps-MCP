@@ -1,597 +1,276 @@
-# DevSecOps MCP Server
+# DevSecOps MCP
 
-A comprehensive Model Context Protocol (MCP) server that integrates Static Application Security Testing (SAST), Dynamic Application Security Testing (DAST), Interactive Application Security Testing (IAST), and Software Composition Analysis (SCA) tools for AI-powered DevSecOps automation.
+Self-hosted security scanning for CI pipelines, with a read-only MCP server for AI-assisted triage.
 
-## 🚀 Features
-
-- **SAST Integration**: ✅ Semgrep, Bandit (verified)
-- **DAST Integration**: ✅ OWASP ZAP (verified) 
-- **IAST Integration**: ✅ Trivy + OWASP ZAP hybrid (verified)
-- **SCA Integration**: ✅ npm audit, OSV Scanner, Trivy (verified)
-- **Comprehensive Security Reports**: JSON, HTML, PDF, SARIF formats
-- **Policy Enforcement**: Configurable security thresholds and gates
-- **Docker Support**: Full containerization with security tools
-- **Real-time Monitoring**: Performance metrics and logging
-- **100% Open Source**: No commercial tool dependencies
-- **AI-Powered Analysis**: Claude integration for intelligent security insights
-
-## 🛠️ Architecture
+- **Jenkins runs the scanners directly** through one CLI, `devsecops-scan`: Semgrep and SonarQube (SAST), OSV-Scanner and Trivy (SCA), Trivy (container images) and OWASP ZAP (DAST).
+- **Every result is stored as JSON and SARIF** under `security-reports/<scan_id>/`, and a **real security gate** (thresholds in `security-rules.yml`) sets the CLI exit code that passes or fails the build.
+- **The MCP server only reads results.** It lists and summarizes them for an LLM client, evaluates the policy and renders reports. It cannot start scans or fetch URLs. It runs over authenticated HTTP or stdio.
+- **Everything is self-hosted**: Docker Compose for a workstation, Kustomize manifests for Kubernetes.
 
 ```
-src/
-├── mcp/
-│   ├── server.ts           # Main MCP server
-│   ├── tools/
-│   │   ├── sast-tool.ts    # SAST integration
-│   │   ├── dast-tool.ts    # DAST integration  
-│   │   ├── iast-tool.ts    # IAST integration
-│   │   └── sca-tool.ts     # SCA integration
-│   └── connectors/
-│       ├── sonarqube.ts
-│       ├── zap.ts
-│       ├── trivy.ts
-│       └── osv-scanner.ts
-├── config/
-│   ├── security-rules.yml
-│   └── tool-configs.json
-└── tests/security/
+Jenkins / K8s Job ── devsecops-scan ──► Semgrep · SonarQube · OSV-Scanner · Trivy · ZAP
+                          │
+                          ▼  JSON + SARIF + policy.json            exit code 0 / 1 / 2
+                 security-reports/<scan_id>/  ─────────────────────► build gate
+                          │  (read-only mount)
+                          ▼
+          MCP server (HTTP + bearer token) ◄──── Claude / any MCP client (triage)
 ```
 
-## 🔧 Installation
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design, data flow and threat model.
 
-### Prerequisites
+## Contents
 
-- Node.js 18+
-- Python 3.8+ (for security tools)
-- Docker & Docker Compose (for containerized deployment)
+- [Components](#components)
+- [Quick start (Docker Compose)](#quick-start-docker-compose)
+- [The `devsecops-scan` CLI](#the-devsecops-scan-cli)
+- [Security policy](#security-policy)
+- [Jenkins](#jenkins)
+- [Kubernetes](#kubernetes)
+- [Connecting MCP clients](#connecting-mcp-clients)
+- [Configuration reference](#configuration-reference)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
 
-### Required Security Tools Installation (verified)
+## Components
+
+| Scan type | Tool | How it runs | Default |
+|---|---|---|---|
+| `sast` | Semgrep 1.179 | CLI (`semgrep scan --json`) | ✔ |
+| `sast` | SonarQube Community 26.9 | `sonar-scanner` 8.1, then the Web API (CE task, quality gate, issues) | |
+| `sca` | OSV-Scanner 2.6 | CLI (`osv-scanner scan source`) | ✔ |
+| `sca` | Trivy 0.75 | CLI (`trivy fs`: vulnerabilities, secrets, misconfigurations) | |
+| `container` | Trivy 0.75 | CLI (`trivy image`) | ✔ |
+| `dast` | OWASP ZAP (daemon) | ZAP API: spider, passive scan; `full` mode adds the active scan | ✔ |
+
+Commercial connectors (Snyk, Veracode, Contrast), the mocked IAST tool, `npm audit` and the scan-triggering MCP tools were removed in v2.
+
+Images (one `Dockerfile`, two targets):
+
+- `--target mcp` (default): the MCP server only. Node 22, non-root, no scanners.
+- `--target scanner`: the CLI plus all scanners and a JVM for `sonar-scanner`. Use it as the Jenkins agent or Kubernetes Job image.
+
+## Quick start (Docker Compose)
+
+Requirements: Docker with Compose v2, about 6 GB of RAM for SonarQube, and `vm.max_map_count=524288` on Linux hosts (`sudo sysctl -w vm.max_map_count=524288`).
 
 ```bash
-# SAST tools
-pip3 install semgrep bandit
+cp .env.example .env
+# fill in MCP_AUTH_TOKEN, SONAR_DB_PASSWORD and ZAP_API_KEY, e.g. with: openssl rand -hex 32
+mkdir -p security-reports
 
-# DAST tools (Docker)
-docker pull owasp/zap2docker-stable
-
-# SCA tools (npm audit is included with Node.js)
-# OSV Scanner (optional)
-wget -qO- https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64.tar.gz | tar -xz -C /usr/local/bin
-
-# Trivy (optional)  
-wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
+docker compose up -d --build          # mcp, sonarqube, postgres, zap
+docker compose ps                     # wait until everything is healthy
 ```
 
-### Local Development
+Compose refuses to start while a required secret is missing. All published ports bind to `127.0.0.1`.
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd DevSecOps-MCP
-   ```
+SonarQube needs a one-time setup: open <http://127.0.0.1:9000>, log in as `admin`/`admin`, change the password, create a **Global Analysis Token** (My Account → Security) and put it in `.env` as `SONAR_TOKEN`.
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
+Run scans with the scanner image. `SCAN_SOURCE` in `.env` picks the source tree; the default is `./test-samples`, which contains deliberately vulnerable code.
 
-3. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your tool credentials
-   ```
+```bash
+docker compose run --rm scanner devsecops-scan sast --target /workspace/src
+docker compose run --rm scanner devsecops-scan sca  --target /workspace/src --tool trivy
+docker compose run --rm scanner devsecops-scan sast --target /workspace/src --tool sonarqube --project-key demo
 
-4. **Build the project**
-   ```bash
-   npm run build
-   ```
+# DAST against the bundled vulnerable demo app
+docker compose --profile demo up -d dast-target
+docker compose run --rm scanner devsecops-scan dast --target http://dast-target:3001/
+```
 
-5. **Start the server**
-   ```bash
-   npm run start:mcp
-   ```
+Then check the MCP server:
 
-### Docker Deployment
+```bash
+curl -s http://127.0.0.1:3000/health                     # {"status":"ok"}
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp   # 401 without a token
+```
 
-1. **Using Docker Compose (Recommended)**
-   ```bash
-   # Copy environment file
-   cp .env.example .env
-   # Edit .env with your credentials
-   
-   # Start all services
-   docker-compose up -d
-   ```
+## The `devsecops-scan` CLI
 
-2. **Using Docker directly**
-   ```bash
-   # Build image
-   docker build -t devsecops-mcp .
-   
-   # Run container
-   docker run -p 3000:3000 --env-file .env devsecops-mcp
-   ```
+```
+devsecops-scan <sast|sca|container|dast> --target <path|image|url> [options]
+devsecops-scan gate   --scan-id <id> [--scan-id <id> ...]
+devsecops-scan report --scan-id <id> [...] [--format markdown|json|sarif] [--out file]
+```
 
-## 🔌 MCP Client Configuration
+| Option | Meaning |
+|---|---|
+| `--target` | `sast`/`sca`: a directory inside an allowed workspace root. `container`: an image reference. `dast`: an http(s) URL. |
+| `--tool` | Overrides the scan type's `default_tool`. |
+| `--scan-id` | Explicit id (`[a-z0-9_-]`, 3–128 characters). Generated when omitted. Existing ids are never overwritten. |
+| `--project-key` | SonarQube project key (required with `--tool sonarqube`). |
+| `--zap-mode` | `baseline` (spider + passive scan) or `full` (adds the active scan; only use it against test environments). |
+| `--no-fail` | Exit 0 on a policy FAIL so later scans still run; a single `gate` decides at the end. |
+| `--rules`, `--reports-dir` | Override `SECURITY_RULES_PATH` and `REPORTS_DIR`. |
 
-To use this MCP server with Claude Desktop or other MCP clients, you need to configure the client settings.
+**Exit codes:** `0` = policy PASS (or WARN under permissive enforcement), `1` = policy FAIL, `2` = scanner, usage or configuration error. A scanner error is still stored as a `failed` result, so the gate never passes on missing evidence.
 
-### Claude Desktop Configuration
+Each scan writes:
 
-1. **Locate the Claude Desktop config file:**
-   - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+```
+security-reports/<scan_id>/
+  result.json    normalized result: summary + findings (severity, rule, location, fix, CWE/CVE)
+  result.sarif   SARIF 2.1.0 for Jenkins Warnings NG, IDEs and code-scanning UIs
+  policy.json    gate decision for this scan
+```
 
-2. **Add the DevSecOps MCP server configuration:**
-   ```json
-   {
-     "mcpServers": {
-       "devsecops": {
-         "command": "node",
-         "args": ["dist/src/mcp/server.js"],
-         "cwd": "/path/to/DevSecOps-MCP",
-         "env": {
-           "NODE_ENV": "production",
-           "MCP_PORT": "3000",
-           "LOG_LEVEL": "info",
-           "SECURITY_STRICT_MODE": "true"
-         }
-       }
-     }
-   }
-   ```
+Guards built into the CLI:
 
-3. **Alternative: Use the provided configuration file:**
-   ```bash
-   # Copy the provided configuration
-   cp .mcprc.json ~/Library/Application\ Support/Claude/claude_desktop_config.json
-   
-   # Edit the cwd path to match your installation
-   ```
+- Targets must resolve (symlinks included) inside `SCAN_WORKSPACE_ROOTS`.
+- Targets that look like flags are refused.
+- Scanners run without a shell, with `--` before the target, a timeout and a size cap on their output.
+- DAST URLs pass an SSRF guard. Loopback, link-local and cloud-metadata (169.254.169.254) addresses are refused unless explicitly allowlisted.
 
-### Other MCP Clients
+## Security policy
 
-For other MCP clients, use the server configuration from `mcp-server.json`:
+[`src/config/security-rules.yml`](src/config/security-rules.yml) is loaded with `yaml` and validated with Joi; unknown keys are errors.
+
+```yaml
+global_policy:
+  enforcement_level: strict      # permissive = report violations as WARN, exit 0
+  thresholds: { critical: 0, high: 0, medium: 5, low: 20 }   # omit or null = unlimited
+sast:
+  thresholds: { critical: 0, high: 0, medium: 5 }            # overrides global per severity
+  require_sonar_quality_gate: true
+dast:
+  target_policy:
+    allowed_hosts: ["*.staging.example.com"]                  # once set, only these are scanned
+    allowed_cidrs: ["10.20.0.0/16"]
+```
+
+The gate fails when any of the following is true:
+
+- a severity count exceeds its threshold;
+- a scan failed;
+- no results were given;
+- the data is incomplete or inconsistent (for example, a summary that under-counts its findings);
+- SonarQube's quality gate is not `OK` while `require_sonar_quality_gate` is on.
+
+Semgrep's registry rulesets need egress to semgrep.dev. On air-gapped runners, point `sast.semgrep.configs` at local rules. [`src/config/semgrep/baseline.yml`](src/config/semgrep/baseline.yml) is a small offline starter set.
+
+## Jenkins
+
+[`Jenkinsfile`](Jenkinsfile) is a ready-to-adapt pipeline:
+
+1. Build and push the scanner image: `docker build --target scanner -t registry.example.com/devsecops-scanner:2.0.0 .`
+2. Install the plugins Docker Pipeline, Credentials Binding, Timestamper, Warnings Next Generation and Lockable Resources.
+3. Add the credentials `sonar-token` and `zap-api-key` (kind: Secret text) if you use SonarQube or DAST.
+4. Create a Pipeline job from SCM and set the parameters (`SCANNER_IMAGE`, `RUN_SONAR`, `IMAGE_REF`, `DAST_TARGET_URL`, ...).
+
+The pipeline runs Semgrep, OSV-Scanner and Trivy in parallel, plus SonarQube and the Trivy image scan when enabled. DAST runs under a `zap-daemon` lock because the daemon holds a single session. The stage `devsecops-scan gate` fails the build on exit code 1 or 2. Reports are archived and the SARIF files are published with Warnings NG.
+
+For Kubernetes agents, swap the agent block for `deploy/k8s/jenkins/scanner-pod.yaml` (the comment in the Jenkinsfile shows how).
+
+## Kubernetes
+
+```bash
+kubectl create namespace devsecops
+kubectl -n devsecops create secret generic devsecops-secrets \
+  --from-literal=mcp-auth-token="$(openssl rand -hex 32)" \
+  --from-literal=sonar-db-password="$(openssl rand -hex 24)" \
+  --from-literal=zap-api-key="$(openssl rand -hex 24)"
+# set your registry in deploy/k8s/base/kustomization.yaml (images:), then
+kubectl apply -k deploy/k8s/base
+```
+
+What the base deploys:
+
+- **MCP** (Deployment + Service). Read-only root filesystem, drop ALL capabilities, read-only reports mount, token taken from a Secret file, no egress.
+- **SonarQube** (StatefulSet) with a `vm.max_map_count` initContainer, and **PostgreSQL** (StatefulSet).
+- **ZAP daemon** (Deployment + Service).
+- The shared **`security-reports` PVC** (ReadWriteMany; see the file for ReadWriteOnce guidance).
+- **NetworkPolicies**:
+  - default deny for ingress;
+  - MCP only accepts traffic from namespaces labelled `devsecops.io/mcp-client=true`;
+  - SonarQube and ZAP only accept pods labelled `devsecops.io/scanner=true`;
+  - Postgres only accepts SonarQube.
+
+`deploy/k8s/examples/scan-job.yaml` shows an on-demand scan Job. It clones a repo, runs the scans and the gate, and writes the results to the PVC.
+
+The SonarQube initContainer is privileged. If your cluster forbids that, delete it, set the sysctl on the nodes, and enforce Pod Security `restricted` on the namespace.
+
+## Connecting MCP clients
+
+Tools (all read-only):
+
+| Tool | Purpose |
+|---|---|
+| `list_scans` | Stored scans, newest first, with severity counts. Filter by `scan_type`. |
+| `get_scan_result` | One result. Findings sorted by severity, filtered by `min_severity`, paginated. |
+| `summarize_findings` | Triage view across scans: totals, findings grouped by rule with example locations and fixes, and the policy decision. |
+| `validate_security_policy` | PASS/WARN/FAIL with reasons for a set of scan ids. |
+| `generate_security_report` | Consolidated markdown, json or sarif report. |
+
+Finding text comes from scanned code and target responses, so treat it as untrusted. The tool descriptions tell the model the same thing.
+
+**HTTP** (Compose/Kubernetes). Claude Code example:
+
+```bash
+claude mcp add --transport http devsecops http://127.0.0.1:3000/mcp \
+  --header "Authorization: Bearer $MCP_AUTH_TOKEN"
+```
+
+**stdio** (local, reading `./security-reports`), for example in a Claude Desktop config:
 
 ```json
 {
-  "name": "devsecops-mcp-server",
-  "command": "node dist/src/mcp/server.js",
-  "args": [],
-  "capabilities": ["tools"]
-}
-```
-
-### Environment Setup
-
-Ensure all required environment variables are set:
-
-```bash
-# Copy environment template
-cp .env.example .env
-
-# Edit with your configuration
-nano .env
-```
-
-**Required for basic functionality:**
-- `SONARQUBE_URL` (if using SonarQube)
-- `ZAP_URL` (if using OWASP ZAP)
-
-**Optional but recommended:**
-- `OSV_SCANNER_PATH`
-- `TRIVY_PATH`
-- `TRIVY_CACHE_DIR`
-
-## 🔐 Configuration
-
-### Environment Variables
-
-Key environment variables (see `.env.example` for complete list):
-
-```bash
-# Server Configuration
-NODE_ENV=production
-MCP_PORT=3000
-SECURITY_STRICT_MODE=true
-
-# Tool Configuration
-SONARQUBE_TOKEN=your-token
-ZAP_API_KEY=your-key
-OSV_SCANNER_PATH=osv-scanner
-TRIVY_PATH=trivy
-TRIVY_CACHE_DIR=/tmp/trivy-cache
-```
-
-### Security Rules
-
-Edit `src/config/security-rules.yml` to customize:
-
-- Vulnerability thresholds
-- Quality gates
-- Policy enforcement
-- Tool configurations
-
-### Tool Configurations
-
-Edit `src/config/tool-configs.json` for:
-
-- Tool-specific settings
-- Scan policies
-- Integration parameters
-
-## 📊 MCP Tools
-
-The server provides the following MCP tools:
-
-### 1. SAST Scan
-```typescript
-{
-  "name": "run_sast_scan",
-  "description": "Execute SAST security scan",
-  "inputSchema": {
-    "target": "string",           // Source code path/repo
-    "rules": "array",             // Security rules
-    "severity_threshold": "enum", // low|medium|high|critical
-    "tool": "enum"                // sonarqube|semgrep|auto
-  }
-}
-```
-
-### 2. DAST Scan
-```typescript
-{
-  "name": "run_dast_scan",
-  "description": "Execute DAST security scan",
-  "inputSchema": {
-    "target_url": "string",       // Application URL
-    "scan_type": "enum",          // quick|baseline|full
-    "authentication": "object"    // Login credentials
-  }
-}
-```
-
-### 3. SCA Scan
-```typescript
-{
-  "name": "run_sca_scan",
-  "description": "Execute SCA dependency scan",
-  "inputSchema": {
-    "project_path": "string",     // Project directory
-    "package_manager": "enum",    // npm|yarn|maven|gradle|pip
-    "tool": "enum",               // osv-scanner|trivy|npm-audit|auto
-    "fix_vulnerabilities": "bool" // Auto-fix enabled
-  }
-}
-```
-
-### 4. IAST Scan
-```typescript
-{
-  "name": "run_iast_scan",
-  "description": "Execute IAST-like security analysis",
-  "inputSchema": {
-    "application_id": "string",   // App identifier or path
-    "environment": "enum",        // dev|staging|testing
-    "tool": "enum",               // trivy|owasp-zap|auto
-    "test_suite": "string"        // Test suite to run (optional)
-  }
-}
-```
-
-### 5. Generate Security Report
-```typescript
-{
-  "name": "generate_security_report",
-  "description": "Generate comprehensive security report",
-  "inputSchema": {
-    "scan_ids": "array",          // Scan result IDs
-    "format": "enum",             // json|html|pdf|sarif
-    "include_remediation": "bool" // Include fix guidance
-  }
-}
-```
-
-### 6. Validate Security Policy
-```typescript
-{
-  "name": "validate_security_policy",
-  "description": "Validate security policy compliance",
-  "inputSchema": {
-    "policy_file": "string",      // Policy file path
-    "scan_results": "array"       // Scan result IDs
-  }
-}
-```
-
-## 🧪 Testing
-
-### ✅ Verified Performance Metrics (Tested on 2025-07-06)
-
-| Security Test | Vulnerabilities Detected | Accuracy | Tool Status | Test Time |
-|---------------|--------------------------|----------|-------------|-----------|
-| **SAST** | 60+ issues | 95%+ | ✅ Verified | ~5s |
-| **DAST** | 5+ types | 100% | ✅ Verified | ~30s |
-| **SCA** | 20 issues | 100% | ✅ Verified | ~3s |
-| **IAST** | Hybrid | 90%+ | ✅ Simulated | ~10s |
-
-### Real-World Vulnerability Detection
-- **OWASP Top 10**: 100% coverage confirmed
-- **CWE Coverage**: 20+ types actually detected
-- **Language Support**: JavaScript, Python fully verified
-
-### Run Tests
-```bash
-# Comprehensive security test (actually verified)
-node test-all-security.js
-
-# SAST testing
-node test-sast.js
-
-# DAST testing with vulnerable web server
-node test-vulnerable-server.js &
-curl "http://localhost:3001/search?q=<script>alert('XSS')</script>"
-
-# Unit tests
-npm test
-
-# With coverage
-npm run test:coverage
-
-# Integration tests
-npm run test:integration
-```
-
-### Test Structure
-- **Real vulnerable samples**: `test-samples/`
-- **Vulnerable dependencies**: `test-vulnerable-dependencies/`
-- **Comprehensive test script**: `test-all-security.js`
-- Unit tests: `tests/security/`
-- Integration tests: `tests/integration/`
-
-## 🚀 Usage Examples
-
-### ⚡ Quick Start (actually verified)
-
-```bash
-# 1. Verify security tools installation
-semgrep --version
-bandit --version
-
-# 2. Test immediately with provided vulnerable samples
-semgrep --config=auto --json test-samples/vulnerable-app.js
-# Result: 7 vulnerabilities detected (SQL Injection, XSS, Command Injection, etc.)
-
-bandit -f json test-samples/vulnerable-app.py  
-# Result: 19 issues found (4 high-risk)
-
-# 3. Scan vulnerable dependencies
-cd test-vulnerable-dependencies && npm audit
-# Result: 20 vulnerabilities (critical: 4, high: 10)
-```
-
-### Basic SAST Scan
-```bash
-curl -X POST http://localhost:3000/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "method": "tools/call",
-    "params": {
-      "name": "run_sast_scan",
-      "arguments": {
-        "target": "/path/to/source",
-        "severity_threshold": "high"
-      }
+  "mcpServers": {
+    "devsecops": {
+      "command": "node",
+      "args": ["/path/to/DevSecOps-MCP/dist/src/mcp/server.js"],
+      "env": { "REPORTS_DIR": "/path/to/security-reports" }
     }
-  }'
+  }
+}
 ```
 
-### Full Security Pipeline
+## Configuration reference
+
+| Variable | Used by | Default | Meaning |
+|---|---|---|---|
+| `MCP_TRANSPORT` | MCP | `stdio` | `stdio` or `http` (`--http` also works) |
+| `MCP_AUTH_TOKEN` / `MCP_AUTH_TOKEN_FILE` | MCP | (required for http) | Bearer token, at least 32 characters |
+| `MCP_HOST`, `MCP_PORT` | MCP | `127.0.0.1`, `3000` | Listen address (the image sets `0.0.0.0`) |
+| `MCP_ALLOWED_HOSTS` | MCP | (empty) | Comma-separated Host header allowlist (DNS-rebinding protection) |
+| `MCP_MAX_RESPONSE_BYTES` | MCP | `1048576` | Cap on a single tool response |
+| `REPORTS_DIR` | both | `./security-reports` | Results directory |
+| `SECURITY_RULES_PATH` | both | `src/config/security-rules.yml` | Policy file |
+| `SCAN_WORKSPACE_ROOTS` | CLI | current directory | Allowed scan roots (path-separator list) |
+| `SEMGREP_PATH`, `TRIVY_PATH`, `OSV_SCANNER_PATH`, `SONAR_SCANNER_PATH` | CLI | binary name | Scanner binaries |
+| `TRIVY_CACHE_DIR` | CLI | Trivy default | Vulnerability DB cache |
+| `SONAR_HOST_URL`, `SONAR_TOKEN` / `SONAR_TOKEN_FILE` | CLI | `http://localhost:9000` | SonarQube |
+| `ZAP_URL`, `ZAP_API_KEY` / `ZAP_API_KEY_FILE` | CLI | `http://localhost:8080` | ZAP daemon API |
+| `SCAN_MAX_OUTPUT_MB` | CLI | `64` | Cap on a scanner's stdout |
+| `LOG_LEVEL` | both | `info` | Logs go to stderr as JSON |
+
+## Development
+
 ```bash
-# 1. SAST Analysis
-curl -X POST http://localhost:3000/mcp \
-  -d '{"method": "tools/call", "params": {"name": "run_sast_scan", "arguments": {"target": "/src"}}}'
-
-# 2. Dependency Scan
-curl -X POST http://localhost:3000/mcp \
-  -d '{"method": "tools/call", "params": {"name": "run_sca_scan", "arguments": {"project_path": "/src"}}}'
-
-# 3. Dynamic Testing
-curl -X POST http://localhost:3000/mcp \
-  -d '{"method": "tools/call", "params": {"name": "run_dast_scan", "arguments": {"target_url": "https://app.example.com"}}}'
-
-# 4. Generate Report
-curl -X POST http://localhost:3000/mcp \
-  -d '{"method": "tools/call", "params": {"name": "generate_security_report", "arguments": {"scan_ids": ["sast-123", "sca-456", "dast-789"], "format": "html"}}}'
+npm ci
+npm run build        # tsc -> dist/
+npm run typecheck    # src + tests
+npm run lint         # ESLint 9 + typescript-eslint
+npm test             # Jest: unit + integration (a real MCP client over HTTP, the CLI with stub scanners)
+npm run scan -- sast --target test-samples   # needs semgrep on PATH
 ```
 
-## 🔒 Security Features
+When `semgrep` is installed, the test suite also runs it for real against `test-samples/` (gate fails) and `src/core/` (gate passes). `test-samples/vulnerable-server.js` is a deliberately vulnerable DAST target that binds to `127.0.0.1` unless `HOST` is set.
 
-### Quality Gates
-- Zero critical/high vulnerabilities policy
-- Code coverage thresholds
-- License compliance checking
-- Secret detection
+## Troubleshooting
 
-### Pre-commit Integration
-```bash
-#!/bin/bash
-# .git/hooks/pre-commit
-git-secrets --scan
-semgrep --config=auto --error
-npm audit --audit-level high
-osv-scanner --lockfile=package-lock.json .
-trivy fs --exit-code 1 --severity HIGH,CRITICAL .
-```
+| Symptom | Fix |
+|---|---|
+| `compose` says a variable is missing | Fill in `.env` (copy it from `.env.example`). Secrets have no defaults on purpose. |
+| SonarQube restarts with `max file descriptors` or `vm.max_map_count` | Raise `ulimit -n` (Compose already sets 131072) and `sysctl -w vm.max_map_count=524288` on the host. |
+| SonarQube logs `flood stage disk watermark` | Free disk space. Elasticsearch locks its indices above 95% disk usage. |
+| `EACCES` writing `security-reports` | The scanner runs as uid 1000. `chown 1000:1000 security-reports`, or set `SCAN_UID`/`SCAN_GID`. |
+| `Target path is outside the allowed workspace` | Scan inside `SCAN_WORKSPACE_ROOTS` (in Jenkins this is `$WORKSPACE`). |
+| `blocked address` for a DAST target | Use the staging host's real name, or add it to `dast.target_policy`. |
+| `osv-scanner exited with code 127 ... api.osv.dev` | The runner needs egress to `api.osv.dev`, or use `--tool trivy`. |
+| Semgrep cannot download `p/...` rulesets | Allow egress to semgrep.dev, or use local rules (`src/config/semgrep/baseline.yml`). |
+| Port 3000 or 9000 already in use | Set `MCP_PORT` / `SONAR_PORT` in `.env`. |
 
-### CI/CD Pipeline Integration
-```yaml
-# .github/workflows/security.yml
-security_scan:
-  runs-on: ubuntu-latest
-  steps:
-    - name: SAST Scan
-      run: |
-        curl -X POST $MCP_SERVER_URL/mcp \
-          -d '{"method": "tools/call", "params": {"name": "run_sast_scan", "arguments": {"target": "."}}}'
-```
+## License
 
-## 📈 Monitoring
-
-### Health Check
-```bash
-curl http://localhost:3000/health
-```
-
-### Metrics (Prometheus)
-- Scan execution times
-- Vulnerability counts
-- Tool success rates
-- API response times
-
-### Logging
-- Structured JSON logging
-- Security event tracking
-- Performance monitoring
-- Error reporting
-
-## 🔧 Troubleshooting (based on real experience)
-
-### Common Issues
-
-#### 1. Security Tools Installation Failure
-```bash
-# Issue: pip3 permission error
-# Solution:
-pip3 install --user semgrep bandit
-
-# Or with system permissions
-sudo pip3 install semgrep bandit
-```
-
-#### 2. TypeScript Compilation Errors  
-```bash
-# Issue: Strict type checking errors
-# Temporary solution: Skip compilation and run with JavaScript
-node test-all-security.js  # Test without TypeScript build
-
-# Permanent solution: Fix tsconfig.json configuration
-```
-
-#### 3. Docker Permission Issues
-```bash
-# Issue: No Docker execution permissions
-# Solution:
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-#### 4. Port Conflicts
-```bash
-# Issue: Ports 3000, 3001 already in use
-# Solution:
-export MCP_PORT=3002
-node test-vulnerable-server.js  # Use different port
-```
-
-#### 5. Vulnerable Dependencies Installation Failure
-```bash
-# Issue: node-sass compilation error
-# Solution: Install excluding problematic packages
-cd test-vulnerable-dependencies
-npm install --ignore-engines
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Run security scans
-6. Submit a pull request
-
-### Development Guidelines
-- Follow TypeScript best practices
-- Maintain test coverage >80%
-- Use secure coding practices
-- Document API changes
-
-## 📝 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-Copyright (c) 2025 jmstar85
-
-## 🆘 Support
-
-- **Documentation**: See `docs/` directory
-- **Issues**: GitHub Issues
-- **Security**: Report security issues privately
-
-## 🔄 Roadmap
-
-### ✅ Completed Items (2025-07-06)
-- [x] SAST tools integration (Semgrep, Bandit)  
-- [x] DAST tools integration (OWASP ZAP)
-- [x] SCA tools integration (npm audit, OSV Scanner)
-- [x] Real vulnerability detection verification (80+ vulnerabilities)
-- [x] MCP server architecture development
-- [x] Claude Desktop integration preparation
-- [x] 100% open source migration (removed Snyk, Veracode)
-- [x] Docker containerization support
-- [x] Comprehensive test suite development
-
-### 🚧 In Progress (1-2 months)
-- [ ] Complete TypeScript compilation error resolution
-- [ ] Real-time MCP server deployment and stabilization
-- [ ] Full Claude Desktop integration testing
-- [ ] Performance optimization and load testing
-
-### 📋 Planned Features (3-6 months)
-- [ ] Additional SAST tools (CodeQL)
-- [ ] Enhanced container security scanning with Trivy
-- [ ] Infrastructure as Code scanning (Checkov, Terrascan)
-- [ ] API security testing integration
-- [ ] Compliance reporting (SOC2, PCI-DSS)
-- [ ] ML-powered vulnerability correlation
-- [ ] Real-time security monitoring dashboard
-
-### 🔮 Long-term Vision (6-12 months)
-- [ ] Mobile app security testing
-- [ ] Integration with more CI/CD platforms  
-- [ ] Advanced SBOM generation and analysis
-- [ ] Autonomous security patching system
-- [ ] Zero Trust architecture integration
-- [ ] Blockchain-based security auditing
-
----
-
-## 🎯 Summary
-
-**DevSecOps MCP Server** is an AI-powered security automation platform verified through real-world testing:
-
-### Key Achievements ✅
-- **80+ real vulnerabilities detected** (SAST: 60+, DAST: 5+, SCA: 20+)
-- **OWASP Top 10 100% coverage** verification completed
-- **All 4 security test types integrated** (SAST, DAST, IAST, SCA)
-- **Fully open source** based (commercial tool dependencies removed)
-- **Claude AI integration** ready
-
-### Ready to Use 🚀
-```bash
-# Setup and test in under 5 minutes
-pip3 install semgrep bandit
-git clone <repo> && cd DevSecOps-MCP
-node test-all-security.js
-```
-
-### Differentiators 💡
-1. **AI Native**: Natural language security analysis with Claude
-2. **Proven Performance**: Tested with real vulnerabilities  
-3. **Zero Cost**: Completely free and open source
-4. **Plug & Play**: Ready-to-use configuration
-
-**Built with security in mind for modern DevSecOps workflows** 🛡️
-
-> *"The future of security is AI-powered, open, and automated."*
+MIT, see [LICENSE](LICENSE).

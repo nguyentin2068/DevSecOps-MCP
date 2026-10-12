@@ -1,0 +1,88 @@
+# OWASP ZAP in daemon mode, driven over its API by `devsecops-scan dast`.
+# One daemon holds one session: serialize DAST runs (the Jenkinsfile locks "zap-daemon").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zap
+  labels:
+    app.kubernetes.io/name: zap
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zap
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zap
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: zap
+          image: ghcr.io/zaproxy/zaproxy:stable
+          command: ["zap.sh"]
+          args:
+            - -daemon
+            - -host
+            - 0.0.0.0
+            - -port
+            - "8080"
+            - -config
+            - api.key=$(ZAP_API_KEY)
+            - -config
+            - api.addrs.addr.name=.*
+            - -config
+            - api.addrs.addr.regex=true
+          env:
+            - name: ZAP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: devsecops-secrets
+                  key: zap-api-key
+          ports:
+            - name: api
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          readinessProbe:
+            tcpSocket:
+              port: api
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zap
+  labels:
+    app.kubernetes.io/name: zap
+spec:
+  selector:
+    app.kubernetes.io/name: zap
+  ports:
+    - name: api
+      port: 8080
+      targetPort: api

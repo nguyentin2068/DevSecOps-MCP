@@ -1,0 +1,109 @@
+# Small offline Semgrep ruleset (no registry access needed). Ported from the custom_rules of
+# the original security-rules.yml. Use it on air-gapped runners or alongside the registry packs:
+#   sast.semgrep.configs: [src/config/semgrep/baseline.yml]
+rules:
+  - id: hardcoded-secret
+    message: Hardcoded credential. Load it from a secret store or environment variable instead.
+    severity: ERROR
+    languages: [javascript, typescript, python]
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      category: security
+    patterns:
+      - pattern-either:
+          - pattern: $KEY = "$VALUE"
+          - pattern: const $KEY = "$VALUE"
+          - pattern: let $KEY = "$VALUE"
+          - pattern: var $KEY = "$VALUE"
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(password|passwd|secret|api_?key|token|private_?key).*
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^.{6,}$
+
+  - id: sql-injection-string-building
+    message: SQL query built from untrusted input. Use parameterized queries.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      category: security
+    pattern-either:
+      - pattern: $DB.query("..." + $X, ...)
+      - pattern: $DB.query(`...${$X}...`, ...)
+      - pattern: $DB.execute("..." + $X, ...)
+      - pattern: $DB.execute(`...${$X}...`, ...)
+
+  - id: python-sql-injection-string-building
+    message: SQL query built from untrusted input. Use parameterized queries.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      category: security
+    pattern-either:
+      - pattern: $CUR.execute("..." + $X, ...)
+      - pattern: $CUR.execute(f"...", ...)
+      - pattern: $CUR.execute("..." % $X, ...)
+      - pattern: $CUR.execute("...".format(...), ...)
+
+  - id: command-injection
+    message: Shell command built from untrusted input. Use execFile/spawn with an argument array.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      category: security
+    pattern-either:
+      - pattern: require('child_process').exec("..." + $X, ...)
+      - pattern: $CP.exec("..." + $X, ...)
+      - pattern: $CP.exec(`...${$X}...`, ...)
+      - pattern: $CP.execSync("..." + $X, ...)
+      - pattern: $CP.execSync(`...${$X}...`, ...)
+
+  - id: python-command-injection
+    message: Shell command built from untrusted input. Pass an argument list and shell=False.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      category: security
+    pattern-either:
+      - pattern: os.system($X)
+      - pattern: subprocess.$FN(..., shell=True, ...)
+
+  - id: code-injection-eval
+    message: eval() on dynamic input allows code injection.
+    severity: ERROR
+    languages: [javascript, typescript, python]
+    metadata:
+      cwe: "CWE-95: Eval Injection"
+      category: security
+    patterns:
+      - pattern: eval($X)
+      - pattern-not: eval("...")
+
+  - id: dom-xss-innerhtml
+    message: Assigning dynamic content to innerHTML enables DOM XSS. Use textContent or sanitize.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      category: security
+    patterns:
+      - pattern: $EL.innerHTML = $X
+      - pattern-not: $EL.innerHTML = "..."
+
+  - id: weak-hash
+    message: MD5/SHA1 are not suitable for passwords or integrity protection.
+    severity: WARNING
+    languages: [javascript, typescript, python]
+    metadata:
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      category: security
+    pattern-either:
+      - pattern: crypto.createHash("md5")
+      - pattern: crypto.createHash("sha1")
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
