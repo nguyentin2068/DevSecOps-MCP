@@ -21,7 +21,10 @@ Jenkins / K8s Job ── devsecops-scan ──► Opengrep · OSV-Scanner · Tri
           MCP server (HTTP + bearer token) ◄──── Claude / any MCP client (triage)
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design, data flow and threat model.
+**Documentation:**
+
+- [docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md): step-by-step setup for Docker Compose, Jenkins and Kubernetes, policy decisions before go-live, a verification checklist and operations.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): design, data flow and threat model.
 
 ## Contents
 
@@ -54,6 +57,8 @@ Images (one `Dockerfile`, two targets):
 - `--target scanner`: the CLI, all scanners, opengrep-rules and nuclei-templates (pinned), non-root uid 1000. No Python, no JVM. Use it as the Jenkins agent or Kubernetes Job image.
 
 ## Quick start (Docker Compose)
+
+Trying it on one machine takes a few minutes. For production setups (registry, Jenkins, Kubernetes, TLS), follow the [deployment guide](docs/DEPLOYMENT-GUIDE.md).
 
 ```bash
 cp .env.example .env                  # set MCP_AUTH_TOKEN (openssl rand -hex 32)
@@ -165,7 +170,9 @@ The gate fails when any of the following is true:
 
 The pipeline runs Opengrep, OSV-Scanner and Trivy in parallel, plus the Trivy image scan when `IMAGE_REF` is set. DAST runs when `DAST_TARGET_URL` is set. It needs no credentials and no shared daemon. The stage `devsecops-scan gate` fails the build on exit code 1 or 2. Reports are archived and the SARIF files are published with Warnings NG.
 
-For Kubernetes agents, swap the agent block for `deploy/k8s/jenkins/scanner-pod.yaml` (the comment in the Jenkinsfile shows how).
+**Results for the MCP server:** set `MCP_REPORTS_DIR` (a Jenkins global or node environment variable) to a directory that is mounted on the agent and that the MCP server also mounts. After each build, the `post` step copies that build's scan directories there. It copies to a temporary name and then renames, so the MCP server never sees a partial result, and it never overwrites. Without the variable, results are only archived in Jenkins. See [deployment guide §5.4](docs/DEPLOYMENT-GUIDE.md#54-deliver-results-to-the-mcp-server).
+
+For Kubernetes agents, swap the agent block for `deploy/k8s/jenkins/scanner-pod.yaml` (the comment in the Jenkinsfile shows how). The pod template satisfies the namespace's `restricted` Pod Security standard, including the injected `jnlp` container.
 
 ## Kubernetes
 
@@ -173,8 +180,8 @@ For Kubernetes agents, swap the agent block for `deploy/k8s/jenkins/scanner-pod.
 kubectl create namespace devsecops
 kubectl -n devsecops create secret generic devsecops-secrets \
   --from-literal=mcp-auth-token="$(openssl rand -hex 32)"
-# set your registry in deploy/k8s/base/kustomization.yaml (images:), then
-kubectl apply -k deploy/k8s/base
+# point an overlay at your registry and storage class (deployment guide §6.1), then
+kubectl apply -k deploy/k8s/overlays/prod
 ```
 
 What the base deploys:
@@ -186,7 +193,7 @@ What the base deploys:
 
 `deploy/k8s/examples/scan-job.yaml` shows an on-demand scan Job. It clones a repo, runs the scans and the gate, and writes the results to the PVC.
 
-Scanner pods carry the label `devsecops.io/scanner=true`. Use it to restrict their egress, for example DAST only to your staging CIDRs.
+Scanner pods carry the label `devsecops.io/scanner=true`. Use it to restrict their egress, for example DAST only to your staging CIDRs. The full walkthrough (overlay, storage class, Ingress with TLS, Jenkins agents writing to the PVC) is in [deployment guide §6](docs/DEPLOYMENT-GUIDE.md#6-topology-c-kubernetes).
 
 ## Connecting MCP clients
 
@@ -232,12 +239,14 @@ claude mcp add --transport http devsecops http://127.0.0.1:3000/mcp \
 | `MCP_HOST`, `MCP_PORT` | MCP | `127.0.0.1`, `3000` | Listen address (the image sets `0.0.0.0`) |
 | `MCP_ALLOWED_HOSTS` | MCP | (empty) | Comma-separated Host header allowlist (DNS-rebinding protection) |
 | `MCP_MAX_RESPONSE_BYTES` | MCP | `1048576` | Cap on a single tool response |
+| `MCP_REPORTS_DIR` | Jenkinsfile | (unset) | Optional directory, shared with the MCP server, that each build's results are copied into |
 | `REPORTS_DIR` | both | `./security-reports` | Results directory |
 | `SECURITY_RULES_PATH` | both | `src/config/security-rules.yml` | Policy file |
 | `SCAN_WORKSPACE_ROOTS` | CLI | current directory | Allowed scan roots (path-separator list) |
 | `OPENGREP_RULES_DIR`, `NUCLEI_TEMPLATES_DIR` | CLI | set in the scanner image | Rule and template locations referenced from the policy file |
 | `OPENGREP_PATH`, `OSV_SCANNER_PATH`, `TRIVY_PATH`, `KATANA_PATH`, `NUCLEI_PATH` | CLI | binary name | Scanner binaries |
 | `TRIVY_CACHE_DIR` | CLI | Trivy default | Vulnerability DB cache |
+| `TRIVY_DB_REPOSITORY`, `TRIVY_JAVA_DB_REPOSITORY` | CLI (read by Trivy) | `mirror.gcr.io`, then `ghcr.io` | Point Trivy at an internal mirror of its databases |
 | `SCAN_MAX_OUTPUT_MB` | CLI | `64` | Cap on a scanner's stdout |
 | `LOG_LEVEL` | both | `info` | Logs go to stderr as JSON |
 

@@ -2,6 +2,7 @@
 // scanner image; results are stored as JSON + SARIF; the build is gated on the CLI exit code.
 //
 // Required plugins: Pipeline, Docker Pipeline, Timestamper, Warnings Next Generation (SARIF).
+// Setup walkthrough: docs/DEPLOYMENT-GUIDE.md.
 // On Kubernetes, replace the docker agent with the pod template in
 // deploy/k8s/jenkins/scanner-pod.yaml (see the comment at the agent block).
 //
@@ -109,6 +110,24 @@ pipeline {
 
   post {
     always {
+      // Optional: hand this build's results to the MCP server. Set MCP_REPORTS_DIR (Jenkins
+      // global or node environment variable) to a directory the agent can write and the MCP
+      // server mounts read-only; see docs/DEPLOYMENT-GUIDE.md. Each scan directory is copied
+      // under a temporary name and renamed, so the MCP server never sees a partial result.
+      script {
+        if (env.MCP_REPORTS_DIR?.trim()) {
+          sh '''
+            set -eu
+            [ -n "${SCAN_PREFIX:-}" ] || exit 0
+            for dir in security-reports/*-"$SCAN_PREFIX"; do
+              [ -d "$dir" ] || continue
+              dest="$MCP_REPORTS_DIR/$(basename "$dir")"
+              [ -e "$dest" ] && continue
+              cp -R "$dir" "$dest.partial.$$" && mv "$dest.partial.$$" "$dest"
+            done
+          '''
+        }
+      }
       archiveArtifacts artifacts: 'security-reports/**', allowEmptyArchive: true, fingerprint: true
       recordIssues(
         enabledForFailure: true,
