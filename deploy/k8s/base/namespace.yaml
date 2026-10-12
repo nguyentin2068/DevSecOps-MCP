@@ -3,9 +3,8 @@ kind: Namespace
 metadata:
   name: devsecops
   labels:
-    # Pod Security Admission: everything runs restricted except the SonarQube sysctl
-    # initContainer (privileged). Drop that initContainer and set vm.max_map_count on the
-    # nodes to enforce "restricted" for the whole namespace.
-    pod-security.kubernetes.io/enforce: privileged
+    # Every workload here runs non-root with no privileges, so the namespace can enforce
+    # the "restricted" Pod Security Standard.
+    pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/audit: restricted

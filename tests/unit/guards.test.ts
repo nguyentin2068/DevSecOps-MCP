@@ -4,7 +4,6 @@ import {
   assertSafeDastTarget,
   resolveWorkspacePath,
   validateImageRef,
-  validateProjectKey,
   ValidationError
 } from '../../src/core/guards';
 import { tempDir } from '../helpers';
@@ -97,10 +96,4 @@ describe('identifier validators', () => {
     expect(() => validateImageRef('App:Latest')).toThrow(ValidationError);
   });
 
-  it('validates SonarQube project keys', () => {
-    expect(validateProjectKey('org:my-app_1.0')).toBe('org:my-app_1.0');
-    expect(() => validateProjectKey('-Dsonar.host.url=http://evil')).toThrow(ValidationError);
-    expect(() => validateProjectKey('12345')).toThrow(ValidationError);
-    expect(() => validateProjectKey('a b')).toThrow(ValidationError);
-  });
 });

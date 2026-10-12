@@ -1,7 +1,7 @@
 # Pod template for the Jenkins Kubernetes plugin. In the Jenkinsfile use:
 #   agent { kubernetes { yamlFile 'deploy/k8s/jenkins/scanner-pod.yaml'; defaultContainer 'scanner' } }
-# The plugin adds the jnlp container. The label lets the NetworkPolicies admit this pod to
-# SonarQube and ZAP.
+# The plugin adds the jnlp container. The label lets you target scanner pods with egress
+# NetworkPolicies (for example, allow DAST traffic only to staging CIDRs).
 apiVersion: v1
 kind: Pod
 metadata:
@@ -17,6 +17,13 @@ spec:
     seccompProfile:
       type: RuntimeDefault
   containers:
+    # The plugin injects the jnlp agent container; declaring it here merges these settings in,
+    # so the pod also passes the "restricted" Pod Security standard of the devsecops namespace.
+    - name: jnlp
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
     - name: scanner
       image: registry.example.com/devsecops-scanner:2.0.0
       command: ["sleep"]
@@ -38,7 +45,15 @@ spec:
       volumeMounts:
         - name: trivy-cache
           mountPath: /var/cache/trivy
+        # To publish results to the MCP server, uncomment this mount, the volume below and set
+        # MCP_REPORTS_DIR=/mcp-reports for the job. The agent pod must run in the namespace that
+        # owns the security-reports PVC (devsecops), and the PVC must be ReadWriteMany.
+        # - name: mcp-reports
+        #   mountPath: /mcp-reports
   volumes:
     - name: trivy-cache
       emptyDir:
         sizeLimit: 2Gi
+    # - name: mcp-reports
+    #   persistentVolumeClaim:
+    #     claimName: security-reports

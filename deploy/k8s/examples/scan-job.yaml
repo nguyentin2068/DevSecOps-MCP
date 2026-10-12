@@ -59,8 +59,8 @@ spec:
               set -e
               id="$(date -u +%Y%m%dt%H%M%S)-${HOSTNAME##*-}"
               devsecops-scan sca --tool trivy --target /workspace/src --scan-id "sca-trivy-job-$id" --no-fail
-              devsecops-scan sast --tool semgrep --target /workspace/src --scan-id "sast-semgrep-job-$id" --no-fail
-              devsecops-scan gate --scan-id "sca-trivy-job-$id" --scan-id "sast-semgrep-job-$id"
+              devsecops-scan sast --tool opengrep --target /workspace/src --scan-id "sast-opengrep-job-$id" --no-fail
+              devsecops-scan gate --scan-id "sca-trivy-job-$id" --scan-id "sast-opengrep-job-$id"
           env:
             - name: SCAN_WORKSPACE_ROOTS
               value: /workspace/src

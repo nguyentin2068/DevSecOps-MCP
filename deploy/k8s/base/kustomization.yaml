@@ -12,9 +12,6 @@ resources:
   - namespace.yaml
   - security-reports-pvc.yaml
   - mcp.yaml
-  - postgres.yaml
-  - sonarqube.yaml
-  - zap.yaml
   - networkpolicies.yaml
 
 # Point these at your registry (images built with: docker build --target mcp|scanner).

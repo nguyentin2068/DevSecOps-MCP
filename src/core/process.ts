@@ -26,7 +26,9 @@ export function runCommand(bin: string, args: string[], options: RunOptions): Pr
   const maxOutput = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, {
+    // Reviewed: running scanners is this module's job. `bin` comes from operator config
+    // (*_PATH env vars / defaults), never from scan input; shell is off and args are an argv array.
+    const child = spawn(bin, args, { // nosemgrep: javascript.lang.security.detect-child-process
       cwd: options.cwd,
       env: options.env ?? process.env,
       shell: false,
