@@ -61,16 +61,6 @@ export function validateImageRef(ref: string): string {
   return ref;
 }
 
-const PROJECT_KEY = /^[A-Za-z0-9_.:-]{1,400}$/;
-
-export function validateProjectKey(key: string): string {
-  rejectFlagLike(key, 'Project key');
-  if (!PROJECT_KEY.test(key) || /^\d+$/.test(key)) {
-    throw new ValidationError(`Invalid SonarQube project key: ${key}`);
-  }
-  return key;
-}
-
 /** Scanner options taken from config (rulesets, exclude globs) must not smuggle extra flags. */
 export function validateOptionValue(value: string, what: string): string {
   rejectFlagLike(value, what);

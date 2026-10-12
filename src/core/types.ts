@@ -5,10 +5,10 @@ export const SCAN_TYPES = ['sast', 'sca', 'container', 'dast'] as const;
 export type ScanType = (typeof SCAN_TYPES)[number];
 
 export const TOOLS_BY_SCAN_TYPE: Record<ScanType, readonly string[]> = {
-  sast: ['semgrep', 'sonarqube'],
+  sast: ['opengrep'],
   sca: ['osv-scanner', 'trivy'],
   container: ['trivy'],
-  dast: ['zap']
+  dast: ['nuclei']
 };
 
 export interface FindingLocation {

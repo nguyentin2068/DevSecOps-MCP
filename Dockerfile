@@ -2,16 +2,20 @@
 #
 # Two images from one Dockerfile:
 #   --target mcp      (default) read-only MCP server over HTTP; Node only, no scanners
-#   --target scanner  devsecops-scan CLI + Semgrep, Trivy, OSV-Scanner, sonar-scanner (Jenkins agent)
+#   --target scanner  devsecops-scan CLI + Opengrep, OSV-Scanner, Trivy, Nuclei, Katana (Jenkins agent)
 #
-# Tool versions are pinned; bump them deliberately.
+# Tool versions, rules and templates are pinned; bump them deliberately.
 ARG NODE_IMAGE=node:22.23.3-bookworm-slim
-ARG PYTHON_IMAGE=python:3.12.15-slim-bookworm
 ARG GO_IMAGE=golang:1.27.1-bookworm
 ARG TRIVY_IMAGE=aquasec/trivy:0.75.0
-ARG SONAR_SCANNER_IMAGE=sonarsource/sonar-scanner-cli:12.2.0.4256_8.1.0
+ARG NUCLEI_IMAGE=projectdiscovery/nuclei:v3.11.1
+ARG OPENGREP_VERSION=v1.30.1
+ARG OPENGREP_SHA256=d3195b9d8d5ae93179f6aa5f5daaba6a920a5a09d38c5d5ae5e60924050210c4
+# opengrep-rules has no release tags; pin a commit.
+ARG OPENGREP_RULES_COMMIT=f1d2b562b414783763fd02a6ed2736eaed622efa
 ARG OSV_SCANNER_VERSION=v2.6.0
-ARG SEMGREP_VERSION=1.179.0
+ARG KATANA_VERSION=v1.8.0
+ARG NUCLEI_TEMPLATES_VERSION=v10.5.0
 
 # ---- application build -------------------------------------------------------------------
 FROM ${NODE_IMAGE} AS build
@@ -21,29 +25,39 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY src ./src
 RUN npm run build && npm prune --omit=dev --ignore-scripts
 
-# ---- scanner binaries ----------------------------------------------------------------------
-FROM ${GO_IMAGE} AS osv
+# ---- scanner binaries, rules and templates -------------------------------------------------
+FROM ${GO_IMAGE} AS tools
+ARG OPENGREP_VERSION
+ARG OPENGREP_SHA256
+ARG OPENGREP_RULES_COMMIT
 ARG OSV_SCANNER_VERSION
-RUN CGO_ENABLED=0 GOBIN=/out go install github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}
+ARG KATANA_VERSION
+ARG NUCLEI_TEMPLATES_VERSION
+# Go modules are checksum-verified against sum.golang.org; CGO off gives static binaries.
+RUN CGO_ENABLED=0 GOBIN=/out go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@${OSV_SCANNER_VERSION}" \
+ && CGO_ENABLED=0 GOBIN=/out go install "github.com/projectdiscovery/katana/cmd/katana@${KATANA_VERSION}"
+RUN curl -fsSL -o /out/opengrep "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86" \
+ && echo "${OPENGREP_SHA256}  /out/opengrep" | sha256sum -c - \
+ && chmod 0755 /out/opengrep
+RUN git clone --quiet --depth 1 --branch "${NUCLEI_TEMPLATES_VERSION}" https://github.com/projectdiscovery/nuclei-templates.git /out/nuclei-templates \
+ && rm -rf /out/nuclei-templates/.git \
+ && git init --quiet /out/opengrep-rules \
+ && git -C /out/opengrep-rules fetch --quiet --depth 1 https://github.com/opengrep/opengrep-rules.git "${OPENGREP_RULES_COMMIT}" \
+ && git -C /out/opengrep-rules checkout --quiet FETCH_HEAD \
+ && rm -rf /out/opengrep-rules/.git
 
 FROM ${TRIVY_IMAGE} AS trivy
-FROM ${SONAR_SCANNER_IMAGE} AS sonar
-FROM ${NODE_IMAGE} AS node
+FROM ${NUCLEI_IMAGE} AS nuclei
 
 # ---- scanner image (Jenkins agent / Kubernetes Job) ---------------------------------------
-FROM ${PYTHON_IMAGE} AS scanner
-ARG SEMGREP_VERSION
-RUN python -m venv /opt/semgrep \
- && /opt/semgrep/bin/pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" \
- && ln -s /opt/semgrep/bin/semgrep /usr/local/bin/semgrep \
- && groupadd --gid 1000 scanner \
- && useradd --uid 1000 --gid scanner --create-home --shell /usr/sbin/nologin scanner
-
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
+FROM ${NODE_IMAGE} AS scanner
+# Go binaries need a CA bundle for HTTPS (Trivy DB, OSV API); the slim image has none.
+COPY --from=tools /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=tools /out/opengrep /out/osv-scanner /out/katana /usr/local/bin/
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
-COPY --from=osv /out/osv-scanner /usr/local/bin/osv-scanner
-COPY --from=sonar /opt/sonar-scanner /opt/sonar-scanner
-COPY --from=sonar /usr/lib/jvm/java-21-amazon-corretto /opt/java
+COPY --from=nuclei /usr/local/bin/nuclei /usr/local/bin/nuclei
+COPY --from=tools /out/opengrep-rules /opt/opengrep-rules
+COPY --from=tools /out/nuclei-templates /opt/nuclei-templates
 
 WORKDIR /app
 COPY --from=build /app/package.json ./
@@ -53,19 +67,20 @@ COPY src/config ./src/config
 RUN printf '#!/bin/sh\nexec node /app/dist/src/cli.js "$@"\n' > /usr/local/bin/devsecops-scan \
  && chmod 0755 /usr/local/bin/devsecops-scan \
  && mkdir -p /workspace /var/cache/trivy \
- && chown scanner:scanner /workspace /var/cache/trivy
+ && chown node:node /workspace /var/cache/trivy
 
 ENV NODE_ENV=production \
-    JAVA_HOME=/opt/java \
-    SONAR_SCANNER_HOME=/opt/sonar-scanner \
-    PATH=/opt/sonar-scanner/bin:/opt/java/bin:${PATH} \
+    LANG=C.UTF-8 \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    OPENGREP_RULES_DIR=/opt/opengrep-rules \
+    NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates \
     TRIVY_CACHE_DIR=/var/cache/trivy \
-    SEMGREP_ENABLE_VERSION_CHECK=0 \
-    SEMGREP_SEND_METRICS=off \
     SCAN_WORKSPACE_ROOTS=/workspace \
     REPORTS_DIR=/workspace/security-reports
 
-USER 1000:1000
+# uid 1000 (node) matches the MCP image, so both can share the reports volume.
+# Opengrep unpacks its runtime under $HOME/.cache, so HOME must be writable.
+USER node
 WORKDIR /workspace
 CMD ["devsecops-scan", "--help"]
 

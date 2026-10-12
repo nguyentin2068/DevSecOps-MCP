@@ -2,13 +2,17 @@
 
 Self-hosted security scanning for CI pipelines, with a read-only MCP server for AI-assisted triage.
 
-- **Jenkins runs the scanners directly** through one CLI, `devsecops-scan`: Semgrep and SonarQube (SAST), OSV-Scanner and Trivy (SCA), Trivy (container images) and OWASP ZAP (DAST).
-- **Every result is stored as JSON and SARIF** under `security-reports/<scan_id>/`, and a **real security gate** (thresholds in `security-rules.yml`) sets the CLI exit code that passes or fails the build.
+- **Jenkins runs the scanners directly** through one CLI, `devsecops-scan`:
+  - **SAST:** Opengrep
+  - **SCA:** OSV-Scanner and Trivy
+  - **Container images:** Trivy
+  - **DAST:** Nuclei, with Katana crawling for the fuzzing pass
+- **Every result is stored as JSON and SARIF** under `security-reports/<scan_id>/`. A **real security gate** (thresholds in `security-rules.yml`) sets the CLI exit code that passes or fails the build.
 - **The MCP server only reads results.** It lists and summarizes them for an LLM client, evaluates the policy and renders reports. It cannot start scans or fetch URLs. It runs over authenticated HTTP or stdio.
-- **Everything is self-hosted**: Docker Compose for a workstation, Kustomize manifests for Kubernetes.
+- **Everything is self-hosted** and needs no long-running scanner services: Docker Compose for a workstation, Kustomize manifests for Kubernetes.
 
 ```
-Jenkins / K8s Job ── devsecops-scan ──► Semgrep · SonarQube · OSV-Scanner · Trivy · ZAP
+Jenkins / K8s Job ── devsecops-scan ──► Opengrep · OSV-Scanner · Trivy · Nuclei (+ Katana crawl)
                           │
                           ▼  JSON + SARIF + policy.json            exit code 0 / 1 / 2
                  security-reports/<scan_id>/  ─────────────────────► build gate
@@ -34,45 +38,35 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design, data flow and t
 
 ## Components
 
-| Scan type | Tool | How it runs | Default |
-|---|---|---|---|
-| `sast` | Semgrep 1.179 | CLI (`semgrep scan --json`) | ✔ |
-| `sast` | SonarQube Community 26.9 | `sonar-scanner` 8.1, then the Web API (CE task, quality gate, issues) | |
-| `sca` | OSV-Scanner 2.6 | CLI (`osv-scanner scan source`) | ✔ |
-| `sca` | Trivy 0.75 | CLI (`trivy fs`: vulnerabilities, secrets, misconfigurations) | |
-| `container` | Trivy 0.75 | CLI (`trivy image`) | ✔ |
-| `dast` | OWASP ZAP (daemon) | ZAP API: spider, passive scan; `full` mode adds the active scan | ✔ |
+| Scan type | Tool | How it runs |
+|---|---|---|
+| `sast` | [Opengrep](https://github.com/opengrep/opengrep) 1.30 (LGPL fork of Semgrep CE) | `opengrep scan --json --taint-intrafile`, with the bundled rules plus [opengrep-rules](https://github.com/opengrep/opengrep-rules) pinned to a commit |
+| `sca` (default) | OSV-Scanner 2.6 | `osv-scanner scan source` |
+| `sca` | Trivy 0.75 | `trivy fs`: vulnerabilities, secrets, misconfigurations |
+| `container` | Trivy 0.75 | `trivy image` |
+| `dast` | Nuclei 3.11 + Katana 1.8 | `baseline`: Nuclei's HTTP templates (nuclei-templates v10.5.0) against the target URL. `full`: also Katana crawls the target (same origin only) and Nuclei's fuzzing (DAST) templates attack the crawled URLs that have parameters |
 
-Commercial connectors (Snyk, Veracode, Contrast), the mocked IAST tool, `npm audit` and the scan-triggering MCP tools were removed in v2.
+SonarQube, OWASP ZAP and Semgrep were removed in this version (see [Migrating](#migrating-from-semgrep-sonarqube-and-zap)).
 
 Images (one `Dockerfile`, two targets):
 
 - `--target mcp` (default): the MCP server only. Node 22, non-root, no scanners.
-- `--target scanner`: the CLI plus all scanners and a JVM for `sonar-scanner`. Use it as the Jenkins agent or Kubernetes Job image.
+- `--target scanner`: the CLI, all scanners, opengrep-rules and nuclei-templates (pinned), non-root uid 1000. No Python, no JVM. Use it as the Jenkins agent or Kubernetes Job image.
 
 ## Quick start (Docker Compose)
 
-Requirements: Docker with Compose v2, about 6 GB of RAM for SonarQube, and `vm.max_map_count=524288` on Linux hosts (`sudo sysctl -w vm.max_map_count=524288`).
-
 ```bash
-cp .env.example .env
-# fill in MCP_AUTH_TOKEN, SONAR_DB_PASSWORD and ZAP_API_KEY, e.g. with: openssl rand -hex 32
+cp .env.example .env                  # set MCP_AUTH_TOKEN (openssl rand -hex 32)
 mkdir -p security-reports
-
-docker compose up -d --build          # mcp, sonarqube, postgres, zap
-docker compose ps                     # wait until everything is healthy
+docker compose up -d --build mcp      # the MCP server
+docker compose build scanner          # the scanner image (profile "scan")
 ```
-
-Compose refuses to start while a required secret is missing. All published ports bind to `127.0.0.1`.
-
-SonarQube needs a one-time setup: open <http://127.0.0.1:9000>, log in as `admin`/`admin`, change the password, create a **Global Analysis Token** (My Account → Security) and put it in `.env` as `SONAR_TOKEN`.
 
 Run scans with the scanner image. `SCAN_SOURCE` in `.env` picks the source tree; the default is `./test-samples`, which contains deliberately vulnerable code.
 
 ```bash
 docker compose run --rm scanner devsecops-scan sast --target /workspace/src
 docker compose run --rm scanner devsecops-scan sca  --target /workspace/src --tool trivy
-docker compose run --rm scanner devsecops-scan sast --target /workspace/src --tool sonarqube --project-key demo
 
 # DAST against the bundled vulnerable demo app
 docker compose --profile demo up -d dast-target
@@ -97,10 +91,9 @@ devsecops-scan report --scan-id <id> [...] [--format markdown|json|sarif] [--out
 | Option | Meaning |
 |---|---|
 | `--target` | `sast`/`sca`: a directory inside an allowed workspace root. `container`: an image reference. `dast`: an http(s) URL. |
-| `--tool` | Overrides the scan type's `default_tool`. |
+| `--tool` | Overrides the scan type's `default_tool` (only `sca` has a choice: `osv-scanner` or `trivy`). |
 | `--scan-id` | Explicit id (`[a-z0-9_-]`, 3–128 characters). Generated when omitted. Existing ids are never overwritten. |
-| `--project-key` | SonarQube project key (required with `--tool sonarqube`). |
-| `--zap-mode` | `baseline` (spider + passive scan) or `full` (adds the active scan; only use it against test environments). |
+| `--dast-mode` | `baseline` (Nuclei HTTP templates against the target) or `full` (adds a Katana crawl and the fuzzing templates on crawled URLs with parameters; active attacks, only against test environments). |
 | `--no-fail` | Exit 0 on a policy FAIL so later scans still run; a single `gate` decides at the end. |
 | `--rules`, `--reports-dir` | Override `SECURITY_RULES_PATH` and `REPORTS_DIR`. |
 
@@ -118,9 +111,11 @@ security-reports/<scan_id>/
 Guards built into the CLI:
 
 - Targets must resolve (symlinks included) inside `SCAN_WORKSPACE_ROOTS`.
-- Targets that look like flags are refused.
+- Flag-like targets and options are refused.
 - Scanners run without a shell, with `--` before the target, a timeout and a size cap on their output.
-- DAST URLs pass an SSRF guard. Loopback, link-local and cloud-metadata (169.254.169.254) addresses are refused unless explicitly allowlisted.
+- DAST targets pass an SSRF guard. Loopback, link-local and cloud-metadata (169.254.169.254) addresses are refused unless explicitly allowlisted.
+- Katana results are filtered to the target's own origin before Nuclei sees them.
+- Nuclei runs with no out-of-band (interactsh) callbacks, no redirects, HTTP templates only, `dos`/`intrusive` tags excluded, and raw requests/responses omitted from the output.
 
 ## Security policy
 
@@ -131,34 +126,44 @@ global_policy:
   enforcement_level: strict      # permissive = report violations as WARN, exit 0
   thresholds: { critical: 0, high: 0, medium: 5, low: 20 }   # omit or null = unlimited
 sast:
-  thresholds: { critical: 0, high: 0, medium: 5 }            # overrides global per severity
-  require_sonar_quality_gate: true
+  thresholds: { critical: 0, high: 0, medium: null, low: null }   # overrides global; null = report only
+  opengrep:
+    taint_intrafile: true
+    configs: [opengrep/baseline.yml, "${OPENGREP_RULES_DIR}/python", ...]
 dast:
+  thresholds: { critical: 0, high: 0, medium: 0 }            # reflected XSS / open redirect are medium
+  mode: baseline
+  crawl: { enabled: true, max_depth: 3, max_duration_seconds: 300, max_urls: 500 }
+  nuclei: { exclude_tags: [dos, intrusive], rate_limit: 50 }
   target_policy:
     allowed_hosts: ["*.staging.example.com"]                  # once set, only these are scanned
     allowed_cidrs: ["10.20.0.0/16"]
 ```
+
+Relative rule paths resolve against the rules file's directory, and `${VAR}` expands from the environment. The scanner image sets `OPENGREP_RULES_DIR` and `NUCLEI_TEMPLATES_DIR`; a referenced variable that is unset is an error.
 
 The gate fails when any of the following is true:
 
 - a severity count exceeds its threshold;
 - a scan failed;
 - no results were given;
-- the data is incomplete or inconsistent (for example, a summary that under-counts its findings);
-- SonarQube's quality gate is not `OK` while `require_sonar_quality_gate` is on.
+- the data is incomplete or inconsistent (for example, a summary that under-counts its findings).
 
-Semgrep's registry rulesets need egress to semgrep.dev. On air-gapped runners, point `sast.semgrep.configs` at local rules. [`src/config/semgrep/baseline.yml`](src/config/semgrep/baseline.yml) is a small offline starter set.
+**Default thresholds and tuning:**
+
+- **SAST:** only `critical` and `high` gate the build. opengrep-rules is broad and on a typical codebase reports many medium/low findings that are false positives (for example `path-join-resolve-traversal` on guarded code), so `medium` and `low` are `null`: recorded in the reports and SARIF, not enforced. Trim `configs` to the languages you use, suppress reviewed findings inline (`// nosemgrep: <rule-id>`), then set `medium` to a number to start enforcing it.
+- **DAST:** Nuclei rates confirmed reflected XSS and open redirects as `medium`, so `medium: 0` fails the build on them. `info` findings (technology fingerprints, missing headers) are never gated.
+- **SCA and container:** unchanged (`critical`/`high` at 0; SCA allows up to 3 medium and 10 low).
 
 ## Jenkins
 
 [`Jenkinsfile`](Jenkinsfile) is a ready-to-adapt pipeline:
 
-1. Build and push the scanner image: `docker build --target scanner -t registry.example.com/devsecops-scanner:2.0.0 .`
-2. Install the plugins Docker Pipeline, Credentials Binding, Timestamper, Warnings Next Generation and Lockable Resources.
-3. Add the credentials `sonar-token` and `zap-api-key` (kind: Secret text) if you use SonarQube or DAST.
-4. Create a Pipeline job from SCM and set the parameters (`SCANNER_IMAGE`, `RUN_SONAR`, `IMAGE_REF`, `DAST_TARGET_URL`, ...).
+1. Build and push the scanner image: `docker build --target scanner -t registry.example.com/devsecops-scanner:2.1.0 .`
+2. Install the plugins Docker Pipeline, Timestamper and Warnings Next Generation.
+3. Create a Pipeline job from SCM and set the parameters (`SCANNER_IMAGE`, `IMAGE_REF`, `DAST_TARGET_URL`, `DAST_MODE`).
 
-The pipeline runs Semgrep, OSV-Scanner and Trivy in parallel, plus SonarQube and the Trivy image scan when enabled. DAST runs under a `zap-daemon` lock because the daemon holds a single session. The stage `devsecops-scan gate` fails the build on exit code 1 or 2. Reports are archived and the SARIF files are published with Warnings NG.
+The pipeline runs Opengrep, OSV-Scanner and Trivy in parallel, plus the Trivy image scan when `IMAGE_REF` is set. DAST runs when `DAST_TARGET_URL` is set. It needs no credentials and no shared daemon. The stage `devsecops-scan gate` fails the build on exit code 1 or 2. Reports are archived and the SARIF files are published with Warnings NG.
 
 For Kubernetes agents, swap the agent block for `deploy/k8s/jenkins/scanner-pod.yaml` (the comment in the Jenkinsfile shows how).
 
@@ -167,9 +172,7 @@ For Kubernetes agents, swap the agent block for `deploy/k8s/jenkins/scanner-pod.
 ```bash
 kubectl create namespace devsecops
 kubectl -n devsecops create secret generic devsecops-secrets \
-  --from-literal=mcp-auth-token="$(openssl rand -hex 32)" \
-  --from-literal=sonar-db-password="$(openssl rand -hex 24)" \
-  --from-literal=zap-api-key="$(openssl rand -hex 24)"
+  --from-literal=mcp-auth-token="$(openssl rand -hex 32)"
 # set your registry in deploy/k8s/base/kustomization.yaml (images:), then
 kubectl apply -k deploy/k8s/base
 ```
@@ -177,18 +180,13 @@ kubectl apply -k deploy/k8s/base
 What the base deploys:
 
 - **MCP** (Deployment + Service). Read-only root filesystem, drop ALL capabilities, read-only reports mount, token taken from a Secret file, no egress.
-- **SonarQube** (StatefulSet) with a `vm.max_map_count` initContainer, and **PostgreSQL** (StatefulSet).
-- **ZAP daemon** (Deployment + Service).
 - The shared **`security-reports` PVC** (ReadWriteMany; see the file for ReadWriteOnce guidance).
-- **NetworkPolicies**:
-  - default deny for ingress;
-  - MCP only accepts traffic from namespaces labelled `devsecops.io/mcp-client=true`;
-  - SonarQube and ZAP only accept pods labelled `devsecops.io/scanner=true`;
-  - Postgres only accepts SonarQube.
+- **NetworkPolicies**: default deny for ingress; MCP only accepts traffic from namespaces labelled `devsecops.io/mcp-client=true`.
+- The namespace enforces the Pod Security `restricted` standard.
 
 `deploy/k8s/examples/scan-job.yaml` shows an on-demand scan Job. It clones a repo, runs the scans and the gate, and writes the results to the PVC.
 
-The SonarQube initContainer is privileged. If your cluster forbids that, delete it, set the sysctl on the nodes, and enforce Pod Security `restricted` on the namespace.
+Scanner pods carry the label `devsecops.io/scanner=true`. Use it to restrict their egress, for example DAST only to your staging CIDRs.
 
 ## Connecting MCP clients
 
@@ -237,10 +235,9 @@ claude mcp add --transport http devsecops http://127.0.0.1:3000/mcp \
 | `REPORTS_DIR` | both | `./security-reports` | Results directory |
 | `SECURITY_RULES_PATH` | both | `src/config/security-rules.yml` | Policy file |
 | `SCAN_WORKSPACE_ROOTS` | CLI | current directory | Allowed scan roots (path-separator list) |
-| `SEMGREP_PATH`, `TRIVY_PATH`, `OSV_SCANNER_PATH`, `SONAR_SCANNER_PATH` | CLI | binary name | Scanner binaries |
+| `OPENGREP_RULES_DIR`, `NUCLEI_TEMPLATES_DIR` | CLI | set in the scanner image | Rule and template locations referenced from the policy file |
+| `OPENGREP_PATH`, `OSV_SCANNER_PATH`, `TRIVY_PATH`, `KATANA_PATH`, `NUCLEI_PATH` | CLI | binary name | Scanner binaries |
 | `TRIVY_CACHE_DIR` | CLI | Trivy default | Vulnerability DB cache |
-| `SONAR_HOST_URL`, `SONAR_TOKEN` / `SONAR_TOKEN_FILE` | CLI | `http://localhost:9000` | SonarQube |
-| `ZAP_URL`, `ZAP_API_KEY` / `ZAP_API_KEY_FILE` | CLI | `http://localhost:8080` | ZAP daemon API |
 | `SCAN_MAX_OUTPUT_MB` | CLI | `64` | Cap on a scanner's stdout |
 | `LOG_LEVEL` | both | `info` | Logs go to stderr as JSON |
 
@@ -252,24 +249,31 @@ npm run build        # tsc -> dist/
 npm run typecheck    # src + tests
 npm run lint         # ESLint 9 + typescript-eslint
 npm test             # Jest: unit + integration (a real MCP client over HTTP, the CLI with stub scanners)
-npm run scan -- sast --target test-samples   # needs semgrep on PATH
+npm run scan -- sast --target test-samples   # needs opengrep on PATH (or OPENGREP_PATH) and OPENGREP_RULES_DIR
 ```
 
-When `semgrep` is installed, the test suite also runs it for real against `test-samples/` (gate fails) and `src/core/` (gate passes). `test-samples/vulnerable-server.js` is a deliberately vulnerable DAST target that binds to `127.0.0.1` unless `HOST` is set.
+When `opengrep` is available (on `PATH` or via `OPENGREP_PATH`), the test suite also runs it for real against `test-samples/` (gate fails) and `src/core/` (gate passes, bundled rules only). `test-samples/vulnerable-server.js` is a deliberately vulnerable DAST target that binds to `127.0.0.1` unless `HOST` is set.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `compose` says a variable is missing | Fill in `.env` (copy it from `.env.example`). Secrets have no defaults on purpose. |
-| SonarQube restarts with `max file descriptors` or `vm.max_map_count` | Raise `ulimit -n` (Compose already sets 131072) and `sysctl -w vm.max_map_count=524288` on the host. |
-| SonarQube logs `flood stage disk watermark` | Free disk space. Elasticsearch locks its indices above 95% disk usage. |
+| `Rules file references ${OPENGREP_RULES_DIR}, which is not set` | Run inside the scanner image, or set the variable to a checkout of opengrep-rules (or nuclei-templates for `NUCLEI_TEMPLATES_DIR`). |
+| Opengrep fails with `'ascii' codec can't decode` | The CLI already forces `LANG=C.UTF-8`; if you call opengrep directly, set a UTF-8 locale. |
+| Opengrep cannot write `~/.cache/opengrep` | It unpacks its runtime there on first use: make `HOME` writable (the Jenkinsfile uses `$WORKSPACE@tmp/home`). |
+| DAST takes too long | The template pass sends roughly 11,700 HTTP templates (nuclei-templates v10.5.0) to the target. Set `nuclei.include_tags` (for example `misconfig,exposure,cve`) or `severities`, raise `rate_limit` if the target can take it, and in full mode lower `crawl.max_urls`. |
 | `EACCES` writing `security-reports` | The scanner runs as uid 1000. `chown 1000:1000 security-reports`, or set `SCAN_UID`/`SCAN_GID`. |
 | `Target path is outside the allowed workspace` | Scan inside `SCAN_WORKSPACE_ROOTS` (in Jenkins this is `$WORKSPACE`). |
 | `blocked address` for a DAST target | Use the staging host's real name, or add it to `dast.target_policy`. |
 | `osv-scanner exited with code 127 ... api.osv.dev` | The runner needs egress to `api.osv.dev`, or use `--tool trivy`. |
-| Semgrep cannot download `p/...` rulesets | Allow egress to semgrep.dev, or use local rules (`src/config/semgrep/baseline.yml`). |
-| Port 3000 or 9000 already in use | Set `MCP_PORT` / `SONAR_PORT` in `.env`. |
+| Port 3000 already in use | Set `MCP_PORT` in `.env`. |
+
+## Migrating from Semgrep, SonarQube and ZAP
+
+- **Policy file:** `sast.semgrep` is now `sast.opengrep`. `sast.require_sonar_quality_gate` and `sast.sonarqube` are gone, and `dast.zap` is replaced by `dast.mode`, `dast.crawl` and `dast.nuclei`. Unknown keys are rejected, so the old file fails validation with a clear message.
+- **CLI:** `--project-key` and `--zap-mode` are gone; use `--dast-mode`. Tool names are `opengrep` and `nuclei`.
+- **Rules:** Semgrep registry packs (`p/...`) are still passed through to Opengrep, but they are covered by the Semgrep Rules License. The default now uses rules shipped in the image.
+- **Coverage changes:** Nuclei finds known CVEs, misconfigurations and exposures well. It is weaker than ZAP's active scan at finding new injection bugs in custom code, even with `--dast-mode full`. SonarQube's dashboards, coverage metrics and hotspot review have no replacement here.
 
 ## License
 

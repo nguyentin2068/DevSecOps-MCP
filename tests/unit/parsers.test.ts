@@ -1,14 +1,14 @@
 import { parseOsv } from '../../src/core/scanners/osv-scanner';
-import { parseSemgrep } from '../../src/core/scanners/semgrep';
-import { parseReportTask, parseSonarIssues } from '../../src/core/scanners/sonarqube';
+import { parseKatana } from '../../src/core/scanners/katana';
+import { nucleiArgs, parseNuclei } from '../../src/core/scanners/nuclei';
+import { parseOpengrep } from '../../src/core/scanners/opengrep';
 import { parseTrivy } from '../../src/core/scanners/trivy';
-import { parseZapAlerts } from '../../src/core/scanners/zap';
 import { toSarif } from '../../src/core/sarif';
 import { scanResult } from '../helpers';
 
-describe('parseSemgrep', () => {
+describe('parseOpengrep', () => {
   it('maps severities, relative paths and metadata', () => {
-    const out = parseSemgrep(
+    const out = parseOpengrep(
       {
         version: '1.179.0',
         results: [
@@ -142,46 +142,102 @@ describe('parseOsv', () => {
   });
 });
 
-describe('parseZapAlerts', () => {
-  it('maps risk codes, skips false positives and deduplicates instances', () => {
-    const alert = { pluginId: '40012', alertRef: '40012', name: 'Cross Site Scripting (Reflected)', riskcode: '3', confidence: 'Medium', url: 'http://app/search?q=x', method: 'GET', param: 'q', solution: 'Encode output', cweid: '79', reference: 'https://owasp.org/xss https://cwe.mitre.org/79' };
-    const out = parseZapAlerts([
-      alert,
-      { ...alert },
-      { pluginId: '10038', name: 'CSP Header Not Set', riskcode: '2', confidence: 'High', url: 'http://app/' },
-      { pluginId: '10096', name: 'Timestamp Disclosure', riskcode: '0', confidence: 'Low', url: 'http://app/', cweid: '-1' },
-      { pluginId: '1', name: 'Dismissed', riskcode: '3', confidence: 'False Positive', url: 'http://app/' }
-    ]);
-    expect(out.findings.map((f) => f.severity)).toEqual(['high', 'medium', 'info']);
-    expect(out.findings[0]).toMatchObject({
-      rule_id: '40012',
-      location: { url: 'http://app/search?q=x', method: 'GET', parameter: 'q' },
-      fix: 'Encode output',
-      cwe: ['CWE-79'],
-      references: ['https://owasp.org/xss', 'https://cwe.mitre.org/79']
+describe('parseNuclei', () => {
+  const line = (overrides: Record<string, unknown>) =>
+    JSON.stringify({
+      'template-id': 'CVE-2021-41773',
+      info: {
+        name: 'Apache 2.4.49 - Path Traversal',
+        severity: 'critical',
+        description: 'Path traversal and file disclosure.\n',
+        remediation: 'Upgrade to 2.4.51',
+        reference: ['https://nvd.nist.gov/vuln/detail/CVE-2021-41773', 'not-a-url'],
+        classification: { 'cve-id': ['cve-2021-41773'], 'cwe-id': ['cwe-22'] }
+      },
+      type: 'http',
+      host: 'http://app:8080',
+      'matched-at': 'http://app:8080/cgi-bin/.%2e/etc/passwd',
+      'extracted-results': ['root:x:0:0'],
+      'curl-command': 'curl -H "Authorization: Bearer secret"',
+      ...overrides
     });
-    expect(out.findings[2]?.cwe).toBeUndefined();
-    expect(out.metadata).toEqual({ false_positives_skipped: 1 });
+
+  it('maps template metadata, normalizes CVE/CWE ids and drops raw evidence', () => {
+    const out = parseNuclei(
+      [
+        line({}),
+        line({}),
+        line({ 'template-id': 'http-missing-security-headers', 'matcher-name': 'content-security-policy', info: { name: 'Missing headers', severity: 'info' } }),
+        line({ 'template-id': 'dast-xss', 'fuzzing_parameter': 'q', 'fuzzing_method': 'get', info: { name: 'Reflected XSS', severity: 'medium' } }),
+        line({ 'template-id': 'odd', info: { name: 'Odd', severity: 'unknown' } }),
+        'not json',
+        ''
+      ].join('\n')
+    );
+    expect(out.findings.map((f) => f.severity)).toEqual(['critical', 'info', 'medium', 'medium']);
+    expect(out.findings[0]).toMatchObject({
+      rule_id: 'CVE-2021-41773',
+      title: 'Apache 2.4.49 - Path Traversal',
+      location: { url: 'http://app:8080/cgi-bin/.%2e/etc/passwd', method: 'GET' },
+      description: 'Path traversal and file disclosure.',
+      fix: 'Upgrade to 2.4.51',
+      references: ['https://nvd.nist.gov/vuln/detail/CVE-2021-41773'],
+      cve: ['CVE-2021-41773'],
+      cwe: ['CWE-22']
+    });
+    expect(out.findings[1]?.title).toBe('Missing headers [content-security-policy]');
+    expect(out.findings[2]?.location).toMatchObject({ parameter: 'q', method: 'GET' });
+    expect(out.metadata).toEqual({ malformed_lines: 1 });
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain('root:x:0:0');
+    expect(serialized).not.toContain('Bearer secret');
+  });
+
+  it('builds safe arguments: no OAST, no redirects, HTTP templates only, no raw output', () => {
+    const base = {
+      bin: 'nuclei',
+      templates: ['/opt/nuclei-templates'],
+      severities: [],
+      includeTags: [],
+      excludeTags: ['dos', 'intrusive'],
+      excludeTemplateIds: [],
+      rateLimit: 50,
+      concurrency: 10,
+      requestTimeoutSeconds: 10,
+      timeoutSeconds: 600
+    };
+    const args = nucleiArgs('/tmp/list.txt', base, false);
+    for (const flag of ['-ni', '-dr', '-or', '-ot', '-duc', '-jsonl']) expect(args).toContain(flag);
+    expect(args.slice(args.indexOf('-pt'), args.indexOf('-pt') + 2)).toEqual(['-pt', 'http']);
+    expect(args.slice(args.indexOf('-etags'), args.indexOf('-etags') + 2)).toEqual(['-etags', 'dos,intrusive']);
+    expect(args).not.toContain('-dast');
+    expect(args).not.toContain('-code');
+    expect(nucleiArgs('/tmp/list.txt', base, true)).toContain('-dast');
+    expect(() => nucleiArgs('/tmp/list.txt', { ...base, templates: ['-code'] }, false)).toThrow(/must not start with "-"/);
   });
 });
 
-describe('SonarQube parsing', () => {
-  it('prefers security impacts over legacy severities and strips the project prefix', () => {
-    const findings = parseSonarIssues(
-      [
-        { key: 'A1', rule: 'javascript:S2068', severity: 'MAJOR', component: 'my-app:src/db.js', line: 4, message: 'Hard-coded password', impacts: [{ softwareQuality: 'SECURITY', severity: 'BLOCKER' }] },
-        { key: 'A2', rule: 'java:S3649', severity: 'CRITICAL', component: 'my-app:Main.java', message: 'SQL injection' }
-      ],
-      'my-app'
-    );
-    expect(findings).toEqual([
-      { id: 'A1', rule_id: 'javascript:S2068', title: 'Hard-coded password', severity: 'critical', location: { path: 'src/db.js', line: 4 } },
-      { id: 'A2', rule_id: 'java:S3649', title: 'SQL injection', severity: 'high', location: { path: 'Main.java', line: 0 } }
+describe('parseKatana', () => {
+  it('keeps same-origin GET endpoints only, drops fragments, de-duplicates and caps', () => {
+    const target = new URL('http://app.staging:8080/');
+    const rec = (endpoint: string, method = 'GET') => JSON.stringify({ request: { method, endpoint } });
+    const output = [
+      rec('http://app.staging:8080/search?q=1'),
+      rec('http://app.staging:8080/search?q=1#top'),
+      rec('http://app.staging:8080/login', 'POST'),
+      rec('http://evil.example/steal'),
+      rec('https://app.staging:8080/other-scheme'),
+      rec('http://app.staging:9090/other-port'),
+      rec('http://169.254.169.254/latest/meta-data/'),
+      'garbage',
+      rec('http://app.staging:8080/about')
+    ].join('\n');
+    expect(parseKatana(output, target, 100)).toEqual([
+      'http://app.staging:8080/',
+      'http://app.staging:8080/search?q=1',
+      'http://app.staging:8080/about'
     ]);
-  });
-
-  it('reads the compute engine task id from report-task.txt', () => {
-    expect(parseReportTask('projectKey=x\nceTaskId=AY123\nceTaskUrl=http://s/api/ce/task?id=AY123\n')['ceTaskId']).toBe('AY123');
+    expect(parseKatana(output, target, 2)).toHaveLength(2);
   });
 });
 

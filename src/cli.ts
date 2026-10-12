@@ -20,10 +20,9 @@ const USAGE = `Usage:
 
 Scan options:
   --target <value>        sast/sca: directory inside the workspace; container: image ref; dast: URL
-  --tool <name>           sast: semgrep|sonarqube, sca: osv-scanner|trivy, container: trivy, dast: zap
+  --tool <name>           sast: opengrep, sca: osv-scanner|trivy, container: trivy, dast: nuclei
   --scan-id <id>          explicit id ([a-z0-9_-], 3-128 chars); generated when omitted
-  --project-key <key>     SonarQube project key (required with --tool sonarqube)
-  --zap-mode <mode>       baseline|full (overrides the rules file)
+  --dast-mode <mode>      baseline|full: full adds nuclei's fuzzing (DAST) templates; test environments only
   --no-fail               always exit 0 on a policy FAIL (scanner errors still exit 2)
 
 Common options:
@@ -62,8 +61,7 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
         target: { type: 'string' },
         tool: { type: 'string' },
         'scan-id': { type: 'string', multiple: true },
-        'project-key': { type: 'string' },
-        'zap-mode': { type: 'string' },
+        'dast-mode': { type: 'string' },
         'no-fail': { type: 'boolean', default: false },
         rules: { type: 'string' },
         'reports-dir': { type: 'string' },
@@ -92,9 +90,9 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
     if ((SCAN_TYPES as readonly string[]).includes(command)) {
       if (!values.target) throw new ValidationError('--target is required');
       if (scanIds.length > 1) throw new ValidationError('a scan accepts at most one --scan-id');
-      const zapMode = values['zap-mode'];
-      if (zapMode !== undefined && zapMode !== 'baseline' && zapMode !== 'full') {
-        throw new ValidationError('--zap-mode must be baseline or full');
+      const dastMode = values['dast-mode'];
+      if (dastMode !== undefined && dastMode !== 'baseline' && dastMode !== 'full') {
+        throw new ValidationError('--dast-mode must be baseline or full');
       }
 
       const outcome = await runScan(
@@ -103,8 +101,7 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
           target: values.target,
           ...(values.tool ? { tool: values.tool } : {}),
           ...(scanIds[0] ? { scanId: scanIds[0] } : {}),
-          ...(values['project-key'] ? { projectKey: values['project-key'] } : {}),
-          ...(zapMode ? { zapMode } : {})
+          ...(dastMode ? { dastMode } : {})
         },
         { rules, store, env }
       );

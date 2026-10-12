@@ -22,7 +22,7 @@ function capture() {
   return { io: { out: (t: string) => out.push(t), err: (t: string) => err.push(t) }, out, err };
 }
 
-const semgrepHit = {
+const opengrepHit = {
   version: 'stub',
   results: [{ check_id: 'stub.sqli', path: 'app.js', start: { line: 1 }, extra: { message: 'SQL injection', severity: 'ERROR' } }],
   errors: []
@@ -35,11 +35,11 @@ describe('devsecops-scan CLI', () => {
   mkdirSync(path.join(workspace, 'app'));
   writeFileSync(path.join(workspace, 'app', 'app.js'), 'db.query("x" + y)');
 
-  const baseEnv = { SCAN_WORKSPACE_ROOTS: workspace, REPORTS_DIR: reports, SECURITY_RULES_PATH: RULES_PATH };
+  const baseEnv = { SCAN_WORKSPACE_ROOTS: workspace, REPORTS_DIR: reports, SECURITY_RULES_PATH: RULES_PATH, OPENGREP_RULES_DIR: '/opt/opengrep-rules' };
   const appDir = path.join(workspace, 'app');
 
   it('exits 1 when findings break the policy and stores JSON + SARIF', async () => {
-    const env = { ...baseEnv, SEMGREP_PATH: stubScanner(bin, 'semgrep-hit', semgrepHit) };
+    const env = { ...baseEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-hit', opengrepHit) };
     const { io, out } = capture();
     const code = await main(['sast', '--target', appDir, '--scan-id', 'sast-cli-hit'], io, env);
     expect(code).toBe(EXIT.POLICY_FAIL);
@@ -49,34 +49,34 @@ describe('devsecops-scan CLI', () => {
     expect(stored.findings[0].rule_id).toBe('stub.sqli');
     expect(JSON.parse(readFileSync(path.join(reports, 'sast-cli-hit', 'policy.json'), 'utf8')).status).toBe('FAIL');
     // The user-controlled target comes after "--" so it can never be parsed as a flag.
-    expect(readFileSync(`${env.SEMGREP_PATH}.args`, 'utf8')).toMatch(new RegExp(`-- ${appDir}\\s*$`));
+    expect(readFileSync(`${env.OPENGREP_PATH}.args`, 'utf8')).toMatch(new RegExp(`-- ${appDir}\\s*$`));
   });
 
   it('exits 0 on a clean scan', async () => {
-    const env = { ...baseEnv, SEMGREP_PATH: stubScanner(bin, 'semgrep-clean', { results: [], errors: [] }) };
+    const env = { ...baseEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-clean', { results: [], errors: [] }) };
     expect(await main(['sast', '--target', appDir], capture().io, env)).toBe(EXIT.PASS);
   });
 
   it('exits 0 on a policy failure with --no-fail', async () => {
-    const env = { ...baseEnv, SEMGREP_PATH: stubScanner(bin, 'semgrep-nofail', semgrepHit) };
+    const env = { ...baseEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-nofail', opengrepHit) };
     expect(await main(['sast', '--target', appDir, '--no-fail'], capture().io, env)).toBe(EXIT.PASS);
   });
 
   it('exits 2 and records a failed scan when the scanner crashes', async () => {
-    const env = { ...baseEnv, SEMGREP_PATH: stubScanner(bin, 'semgrep-crash', 'boom', 7) };
+    const env = { ...baseEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-crash', 'boom', 7) };
     const { io, err } = capture();
     expect(await main(['sast', '--target', appDir, '--scan-id', 'sast-cli-crash'], io, env)).toBe(EXIT.ERROR);
-    expect(err.join('\n')).toMatch(/semgrep exited with code 7/);
+    expect(err.join('\n')).toMatch(/opengrep exited with code 7/);
     expect(JSON.parse(readFileSync(path.join(reports, 'sast-cli-crash', 'result.json'), 'utf8')).status).toBe('failed');
   });
 
   it('exits 2 when the scanner prints invalid JSON', async () => {
-    const env = { ...baseEnv, SEMGREP_PATH: stubScanner(bin, 'semgrep-garbage', 'not json') };
+    const env = { ...baseEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-garbage', 'not json') };
     expect(await main(['sast', '--target', appDir], capture().io, env)).toBe(EXIT.ERROR);
   });
 
   it('exits 2 for a target outside the workspace without running the scanner', async () => {
-    const env = { ...baseEnv, SEMGREP_PATH: path.join(bin, 'does-not-exist') };
+    const env = { ...baseEnv, OPENGREP_PATH: path.join(bin, 'does-not-exist') };
     const { io, err } = capture();
     expect(await main(['sast', '--target', '/etc'], io, env)).toBe(EXIT.ERROR);
     expect(err.join('\n')).toMatch(/outside the allowed workspace/);
@@ -88,8 +88,71 @@ describe('devsecops-scan CLI', () => {
     expect(err.join('\n')).toMatch(/blocked address/);
   });
 
+  it('crawls with katana, keeps only same-origin URLs and runs nuclei with safe flags', async () => {
+    // Stub nuclei copies its -l list file (argument 2) next to itself before printing results.
+    const nucleiFile = path.join(bin, 'nuclei-stub');
+    const finding = JSON.stringify({ 'template-id': 'exposed-env', info: { name: '.env exposed', severity: 'high' }, 'matched-at': 'http://127.0.0.1:3001/.env' });
+    writeFileSync(`${nucleiFile}.json`, `${finding}\n`);
+    writeFileSync(nucleiFile, `#!/bin/sh\necho "$@" >> "${nucleiFile}.args"\ncat "$2" >> "${nucleiFile}.list"\ncat "${nucleiFile}.json"\n`);
+    chmodSync(nucleiFile, 0o755);
+    const katana = stubScanner(
+      bin,
+      'katana-stub',
+      [
+        { request: { method: 'GET', endpoint: 'http://127.0.0.1:3001/search?q=x' } },
+        { request: { method: 'GET', endpoint: 'http://169.254.169.254/latest/meta-data/' } }
+      ]
+        .map((record) => JSON.stringify(record))
+        .join('\n')
+    );
+    const rules = path.join(tempDir('rules-'), 'rules.yml');
+    writeFileSync(rules, readFileSync(RULES_PATH, 'utf8').replace('allowed_cidrs: []', 'allowed_cidrs: ["127.0.0.1/32"]'));
+    const env = { ...baseEnv, SECURITY_RULES_PATH: rules, KATANA_PATH: katana, NUCLEI_PATH: nucleiFile, NUCLEI_TEMPLATES_DIR: '/opt/nuclei-templates' };
+
+    const { io, out } = capture();
+    expect(await main(['dast', '--target', 'http://127.0.0.1:3001/', '--dast-mode', 'full', '--scan-id', 'dast-cli-stub'], io, env)).toBe(EXIT.POLICY_FAIL);
+    expect(out.join('\n')).toMatch(/high=1/);
+
+    // Pass 1 (templates) gets the base URL; pass 2 (fuzzing) gets the crawled URL with parameters.
+    expect(readFileSync(`${nucleiFile}.list`, 'utf8')).toBe('http://127.0.0.1:3001/\nhttp://127.0.0.1:3001/search?q=x\n');
+    const calls = readFileSync(`${nucleiFile}.args`, 'utf8').trim().split('\n');
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatch(/ -ni /);
+    expect(calls[0]).toMatch(/ -dr /);
+    expect(calls[0]).toMatch(/-t \/opt\/nuclei-templates/);
+    expect(calls[1]).toMatch(/ -dast/);
+    expect(readFileSync(`${katana}.args`, 'utf8')).toMatch(/-fs fqdn .*-u http:\/\/127\.0\.0\.1:3001\//);
+  });
+
+  it('runs only the template pass on the base URL in baseline mode (no crawl, no fuzzing)', async () => {
+    const nucleiFile = path.join(bin, 'nuclei-baseline');
+    writeFileSync(nucleiFile, `#!/bin/sh\necho "$@" >> "${nucleiFile}.args"\ncat "$2" >> "${nucleiFile}.list"\n`);
+    chmodSync(nucleiFile, 0o755);
+    const rules = path.join(tempDir('rules-'), 'rules.yml');
+    writeFileSync(rules, readFileSync(RULES_PATH, 'utf8').replace('allowed_cidrs: []', 'allowed_cidrs: ["127.0.0.1/32"]'));
+    const env = {
+      ...baseEnv,
+      SECURITY_RULES_PATH: rules,
+      KATANA_PATH: path.join(bin, 'katana-must-not-run'),
+      NUCLEI_PATH: nucleiFile,
+      NUCLEI_TEMPLATES_DIR: '/opt/nuclei-templates'
+    };
+    expect(await main(['dast', '--target', 'http://127.0.0.1:3001/app'], capture().io, env)).toBe(EXIT.PASS);
+    expect(readFileSync(`${nucleiFile}.list`, 'utf8')).toBe('http://127.0.0.1:3001/app\n');
+    expect(readFileSync(`${nucleiFile}.args`, 'utf8')).not.toMatch(/-dast/);
+  });
+
+  it('fails clearly when the template directory variable is not set', async () => {
+    const rules = path.join(tempDir('rules-'), 'rules.yml');
+    writeFileSync(rules, readFileSync(RULES_PATH, 'utf8').replace('allowed_cidrs: []', 'allowed_cidrs: ["127.0.0.1/32"]'));
+    const { io, err } = capture();
+    expect(await main(['dast', '--target', 'http://127.0.0.1:3001/'], io, { ...baseEnv, SECURITY_RULES_PATH: rules })).toBe(EXIT.ERROR);
+    expect(err.join('\n')).toMatch(/NUCLEI_TEMPLATES_DIR.*not set/);
+  });
+
   it('rejects unknown tools, commands and flags', async () => {
-    expect(await main(['sast', '--target', appDir, '--tool', 'snyk'], capture().io, baseEnv)).toBe(EXIT.ERROR);
+    expect(await main(['sast', '--target', appDir, '--tool', 'semgrep'], capture().io, baseEnv)).toBe(EXIT.ERROR);
+    expect(await main(['dast', '--target', 'http://example.com/', '--tool', 'zap'], capture().io, baseEnv)).toBe(EXIT.ERROR);
     expect(await main(['iast', '--target', appDir], capture().io, baseEnv)).toBe(EXIT.ERROR);
     expect(await main(['sast', '--bogus'], capture().io, baseEnv)).toBe(EXIT.ERROR);
   });
@@ -109,7 +172,7 @@ describe('devsecops-scan CLI', () => {
   });
 
   it('gates and reports across several stored scans', async () => {
-    const env = { ...baseEnv, SEMGREP_PATH: stubScanner(bin, 'semgrep-gate', { results: [] }) };
+    const env = { ...baseEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-gate', { results: [] }) };
     await main(['sast', '--target', appDir, '--scan-id', 'sast-cli-clean'], capture().io, env);
 
     expect(await main(['gate', '--scan-id', 'sast-cli-clean'], capture().io, baseEnv)).toBe(EXIT.PASS);
@@ -125,25 +188,25 @@ describe('devsecops-scan CLI', () => {
   });
 });
 
-let semgrepAvailable = false;
+const OPENGREP = process.env['OPENGREP_PATH'] || 'opengrep';
+let opengrepAvailable = false;
 try {
-  execFileSync('semgrep', ['--disable-version-check', '--version'], { stdio: 'ignore', timeout: 30000 });
-  semgrepAvailable = true;
+  execFileSync(OPENGREP, ['--version'], { stdio: 'ignore', timeout: 60000 });
+  opengrepAvailable = true;
 } catch {
-  semgrepAvailable = false;
+  opengrepAvailable = false;
 }
 
-// Real end-to-end run with the bundled offline ruleset; skipped when semgrep is not installed.
-(semgrepAvailable ? describe : describe.skip)('devsecops-scan CLI with real semgrep', () => {
+// Real end-to-end run with the bundled offline ruleset; skipped when opengrep is not installed.
+(opengrepAvailable ? describe : describe.skip)('devsecops-scan CLI with real opengrep', () => {
   const rules = path.join(tempDir('rules-'), 'rules.yml');
   writeFileSync(
     rules,
     readFileSync(RULES_PATH, 'utf8')
-      .replace('- p/security-audit', `- ${path.join(REPO_ROOT, 'src/config/semgrep/baseline.yml')}`)
-      .replace(/\s+- p\/secrets/, '')
-      .replace(/\s+- p\/owasp-top-ten/, '')
+      .replace('- opengrep/baseline.yml', `- ${path.join(REPO_ROOT, 'src/config/opengrep/baseline.yml')}`)
+      .replace(/\s+- \$\{OPENGREP_RULES_DIR\}\/[a-z/]+/g, '')
   );
-  const env = { SCAN_WORKSPACE_ROOTS: REPO_ROOT, REPORTS_DIR: tempDir('reports-'), SECURITY_RULES_PATH: rules };
+  const env = { SCAN_WORKSPACE_ROOTS: REPO_ROOT, REPORTS_DIR: tempDir('reports-'), SECURITY_RULES_PATH: rules, OPENGREP_PATH: OPENGREP };
 
   it('fails the gate on the vulnerable samples', async () => {
     const { io, out } = capture();

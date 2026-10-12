@@ -73,14 +73,6 @@ function evaluateScan(result: Partial<ScanResult> | undefined, rules: SecurityRu
     }
   }
 
-  if (
-    result.tool === 'sonarqube' &&
-    rules.sast.require_sonar_quality_gate &&
-    result.metadata?.['quality_gate_status'] !== 'OK'
-  ) {
-    evaluation.violations.push(`SonarQube quality gate is ${String(result.metadata?.['quality_gate_status'] ?? 'unknown')}`);
-  }
-
   return evaluation;
 }
 
