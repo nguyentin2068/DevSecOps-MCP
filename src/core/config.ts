@@ -58,6 +58,20 @@ export interface SecurityRules {
     };
     target_policy: DastTargetPolicy;
   };
+  /** Correlation and AI triage (advisory: never changes the gate). */
+  triage: {
+    model: string;
+    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+    /** Groups below this severity are correlated but not sent to the model. */
+    min_severity: Severity;
+    /** Most severe groups sent to the model per build; the rest are reported as not triaged. */
+    max_groups: number;
+    batch_size: number;
+    /** Send source lines around SAST findings (secrets redacted); false = metadata only. */
+    send_code: boolean;
+    context_lines: number;
+    timeout_seconds: number;
+  };
   /** Directory of the rules file; relative scanner config paths resolve against it. */
   base_dir?: string;
 }
@@ -136,6 +150,16 @@ const schema = Joi.object<SecurityRules>({
         .default([]),
       allowed_cidrs: Joi.array().items(Joi.string().pattern(/^[0-9a-fA-F:.]+(\/\d{1,3})?$/)).default([])
     }).default()
+  }).default(),
+  triage: Joi.object({
+    model: Joi.string().pattern(/^[a-z0-9][a-z0-9.-]{1,63}$/).default('claude-opus-5-5'),
+    effort: Joi.string().valid('low', 'medium', 'high', 'xhigh', 'max').default('medium'),
+    min_severity: Joi.string().valid('critical', 'high', 'medium', 'low', 'info').default('low'),
+    max_groups: Joi.number().integer().min(1).max(1000).default(100),
+    batch_size: Joi.number().integer().min(1).max(50).default(15),
+    send_code: Joi.boolean().default(true),
+    context_lines: Joi.number().integer().min(0).max(50).default(10),
+    timeout_seconds: Joi.number().integer().min(10).max(3600).default(300)
   }).default()
 });
 

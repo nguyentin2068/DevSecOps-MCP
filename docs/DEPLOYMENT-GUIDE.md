@@ -71,6 +71,8 @@ The images already contain the Opengrep rules (pinned commit) and the Nuclei tem
 | Your container registry | `container` scans | Only for container scans |
 | The DAST target (staging) | `dast` | Only for DAST |
 | `semgrep.dev` | Only if you add `p/...` registry packs to the policy | No (not used by default) |
+| `api.anthropic.com` | `triage` with AI (Jenkins: `ANTHROPIC_CREDENTIALS_ID` set) | Only for AI triage |
+| Your DefectDojo URL | `defectdojo` (Jenkins: `DEFECTDOJO_URL` set) | Only for the DefectDojo import |
 
 Opengrep, Katana and Nuclei send no telemetry and do no update checks in this setup. Nuclei runs with `-ni`, so it never calls public interactsh/OAST servers.
 
@@ -249,7 +251,7 @@ wsl --install --from-file C:\WSL\ubuntu.wsl
 ### 5.1 Jenkins prerequisites
 
 1. Agents with Docker that can pull `$REGISTRY/devsecops-scanner:$VERSION`. Run `docker login` on the agent, or configure registry credentials in Jenkins.
-2. Plugins: **Pipeline**, **Docker Pipeline**, **Timestamper**, **Warnings Next Generation** (publishes SARIF).
+2. Plugins: **Pipeline**, **Docker Pipeline**, **Timestamper**, **Warnings Next Generation** (publishes SARIF), **Credentials Binding** (AI triage and DefectDojo stages).
 3. The scanner needs no Jenkins credentials. Secrets only matter if you scan private container images; then log the agent in to that registry.
 
 ### 5.2 Add the pipeline to an application repository
@@ -274,8 +276,10 @@ Create the job: **New Item → Pipeline → Pipeline script from SCM** and point
 2. **Pre-check: detect languages**: `devsecops-scan detect` counts the files per language in the checkout, prints the table to the console and stores `security-reports/languages-<prefix>.json`. The languages that have rule sets in `sast.opengrep.language_configs` are kept in `SCAN_LANGUAGES`.
 3. **Scans** (parallel): Opengrep (with `--languages "$SCAN_LANGUAGES"`: only the rule sets of the detected languages, plus the common baseline and secrets rules), OSV-Scanner, Trivy fs, plus Trivy image if `IMAGE_REF` is set. Each runs with `--no-fail`, so all of them finish.
 4. **DAST** if `DAST_TARGET_URL` is set.
-5. **Security gate**: writes `security-reports/summary-<prefix>.md`, then `devsecops-scan gate` fails the build on exit 1 (policy) or 2 (scanner error or missing results).
-6. **Post**: archives `security-reports/**`, publishes the SARIF files in Warnings NG, and optionally copies the results to the MCP server (next step).
+5. **AI triage + correlate**: `devsecops-scan triage` groups duplicate findings across tools and, when the global variable `ANTHROPIC_CREDENTIALS_ID` names a *Secret text* credential with an Anthropic API key, asks Claude for an advisory verdict per group. Writes `security-reports/triage-<prefix>.json` and `.md`. A failure marks the build UNSTABLE.
+6. **DefectDojo import** if `DEFECTDOJO_URL` and `DEFECTDOJO_CREDENTIALS_ID` (*Secret text*, API v2 key) are set: reimports each completed scan as a test of the product (`DEFECTDOJO_PRODUCT`, default the repository or job name) and the engagement `CI/CD <branch>`, with verdicts and correlation as tags. A failure marks the build UNSTABLE.
+7. **Security gate**: writes `security-reports/summary-<prefix>.md`, then `devsecops-scan gate` fails the build on exit 1 (policy) or 2 (scanner error or missing results). It reads the raw results only; steps 5 and 6 never change it.
+8. **Post**: archives `security-reports/**`, publishes the SARIF files in Warnings NG, and optionally copies the results to the MCP server (next step).
 
 > OSV-Scanner exits with code 127 when it cannot reach `api.osv.dev`. The stage then fails (exit 2) by design: the gate never passes on missing evidence. Allow that egress, or replace the OSV stage with Trivy.
 
@@ -465,6 +469,8 @@ docker run --rm -v $PWD/.devsecops:/rules:ro $REGISTRY/devsecops-scanner:$VERSIO
 | `container.trivy.ignore_unfixed` | `true` | Keep, so the gate only fails on findings you can fix. |
 | `dast.thresholds` | critical/high/medium 0 | Keep. Reflected XSS and open redirect are `medium`. |
 | `dast.target_policy` | empty (private networks allowed, loopback/metadata blocked) | Set `allowed_hosts` / `allowed_cidrs` to your staging environments. Once set, nothing else can be scanned. |
+| `triage.send_code` | `true` (±10 lines, credentials redacted, never for secret findings) | Decide whether source may be sent to the Anthropic API. Set `false` to send metadata only. |
+| `triage.max_groups`, `triage.min_severity`, `triage.effort` | 100, `low`, `medium` | Caps cost per build. Raise `effort` for better verdicts on hard findings; lower `max_groups` for large backlogs. |
 | `dast.mode` | `baseline` | Use `full` only against environments where active attacks are acceptable. |
 | `dast.nuclei.include_tags` / `severities` | all templates | The full template set takes 15–20 minutes on a slow target. For CI, consider `include_tags: [cve, misconfig, exposure, default-login]`. |
 

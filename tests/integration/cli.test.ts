@@ -327,3 +327,44 @@ try {
     expect(await main(['sast', '--target', path.join(REPO_ROOT, 'src', 'core')], capture().io, env)).toBe(EXIT.PASS);
   }, 120000);
 });
+
+describe('devsecops-scan triage and defectdojo', () => {
+  const reports = tempDir('reports-triage-');
+  const out = tempDir('triage-out-');
+  const env = { REPORTS_DIR: reports, SECURITY_RULES_PATH: RULES_PATH, SCAN_WORKSPACE_ROOTS: out };
+  const dep = { rule_id: 'CVE-2021-23337', title: 'lodash', severity: 'high', location: { package: 'lodash', version: '4.17.4' }, cve: ['CVE-2021-23337'] };
+
+  beforeAll(() => {
+    for (const [scanId, tool] of [['sca-osv-cli-1', 'osv-scanner'], ['sca-trivy-cli-1', 'trivy']] as const) {
+      mkdirSync(path.join(reports, scanId));
+      const findings = [{ ...dep, id: `${tool}-lodash` }];
+      const result = { schema_version: 1, scan_id: scanId, scan_type: 'sca', tool, status: 'completed', target: out, started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z', duration_ms: 1, summary: { critical: 0, high: 1, medium: 0, low: 0, info: 0, total: 1 }, findings, metadata: {} };
+      writeFileSync(path.join(reports, scanId, 'result.json'), JSON.stringify(result));
+    }
+  });
+
+  it('correlates without AI and writes the JSON and markdown reports', async () => {
+    const { io, out: stdout } = capture();
+    const json = path.join(out, 'triage.json');
+    const md = path.join(out, 'triage.md');
+    expect(await main(['triage', '--scan-id', 'sca-osv-cli-1', '--scan-id', 'sca-trivy-cli-1', '--no-ai', '--out', json, '--md', md], io, env)).toBe(EXIT.PASS);
+    expect(stdout.join('\n')).toMatch(/2 findings in 1 groups \(1 reported more than once\)/);
+    const report = JSON.parse(readFileSync(json, 'utf8'));
+    expect(report.model).toBeNull();
+    expect(report.groups[0].tools).toEqual(['osv-scanner', 'trivy']);
+    expect(readFileSync(md, 'utf8')).toMatch(/^# Correlation and AI triage/);
+  });
+
+  it('requires an API key for AI triage, and DefectDojo settings for the import', async () => {
+    const { io, err } = capture();
+    expect(await main(['triage', '--scan-id', 'sca-osv-cli-1'], io, env)).toBe(EXIT.ERROR);
+    expect(err.join('\n')).toMatch(/ANTHROPIC_API_KEY .*--no-ai/);
+
+    const dd = capture();
+    expect(await main(['defectdojo', '--scan-id', 'sca-osv-cli-1', '--product', 'p', '--engagement', 'e'], dd.io, env)).toBe(EXIT.ERROR);
+    expect(dd.err.join('\n')).toMatch(/DEFECTDOJO_URL and DEFECTDOJO_API_KEY/);
+    const missing = capture();
+    expect(await main(['defectdojo', '--scan-id', 'sca-osv-cli-1'], missing.io, { ...env, DEFECTDOJO_URL: 'https://dojo.example.com', DEFECTDOJO_API_KEY: 'k' })).toBe(EXIT.ERROR);
+    expect(missing.err.join('\n')).toMatch(/--product and --engagement are required/);
+  });
+});

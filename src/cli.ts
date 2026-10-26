@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-import { writeFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { parseArgs } from 'util';
-import { defaultRulesPath, loadRules } from './core/config';
+import Anthropic from '@anthropic-ai/sdk';
+import { defaultRulesPath, envSecret, loadRules } from './core/config';
+import { correlate } from './core/correlate';
+import { DefectDojoClient, importToDefectDojo } from './core/defectdojo';
 import { resolveWorkspacePath, ValidationError, workspaceRootsFromEnv } from './core/guards';
 import { detectLanguages } from './core/languages';
 import { errorMessage } from './core/logger';
@@ -9,6 +12,7 @@ import { evaluatePolicy, PolicyDecision } from './core/policy';
 import { renderReport, ReportFormat } from './core/report';
 import { ReportStore } from './core/report-store';
 import { languageDetectOptions, runScan, scannableLanguages } from './core/scan-runner';
+import { claudeTriageModel, renderTriageMarkdown, runTriage, TriageReport } from './core/triage';
 import { SCAN_TYPES, ScanResult, ScanType } from './core/types';
 
 /** Exit codes: 0 = policy PASS/WARN, 1 = policy FAIL, 2 = scanner/usage/config error. */
@@ -19,6 +23,8 @@ const USAGE = `Usage:
   devsecops-scan <sast|sca|container|dast> --target <path|image|url> [options]
   devsecops-scan gate   --scan-id <id> [--scan-id <id> ...] [options]
   devsecops-scan report --scan-id <id> [--scan-id <id> ...] [--format markdown|json|sarif] [--out file]
+  devsecops-scan triage --scan-id <id> [...] [--out triage.json] [--md triage.md] [--no-ai]
+  devsecops-scan defectdojo --scan-id <id> [...] --product <name> --engagement <name> [options]
 
 Scan options:
   --target <value>        sast/sca: directory inside the workspace; container: image ref; dast: URL
@@ -34,6 +40,16 @@ Detect options:
   --format <fmt>          list (default): comma-separated languages that have rules, for --languages;
                           json: full detection. A summary table always goes to stderr.
   --out <file>            also write the full detection as JSON to this file
+
+Triage options (correlation always runs; AI triage is advisory and needs ANTHROPIC_API_KEY):
+  --out <file>            write the triage report (JSON)
+  --md <file>             write a markdown summary
+  --no-ai                 correlation only, no model calls
+
+DefectDojo options (needs DEFECTDOJO_URL and DEFECTDOJO_API_KEY):
+  --product <name>        product (created if missing)      --product-type <name>  default: DevSecOps
+  --engagement <name>     engagement (created if missing)   --triage <file>        triage report to apply as tags
+  --branch, --commit, --build-id, --scm-uri <value>         recorded on the imported tests
 
 Common options:
   --rules <file>          policy file (default: $SECURITY_RULES_PATH or src/config/security-rules.yml)
@@ -74,6 +90,16 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
         'dast-mode': { type: 'string' },
         languages: { type: 'string' },
         'no-fail': { type: 'boolean', default: false },
+        'no-ai': { type: 'boolean', default: false },
+        md: { type: 'string' },
+        triage: { type: 'string' },
+        product: { type: 'string' },
+        'product-type': { type: 'string' },
+        engagement: { type: 'string' },
+        branch: { type: 'string' },
+        commit: { type: 'string' },
+        'build-id': { type: 'string' },
+        'scm-uri': { type: 'string' },
         quiet: { type: 'boolean', default: false },
         rules: { type: 'string' },
         'reports-dir': { type: 'string' },
@@ -176,6 +202,68 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
         io.out(`Report written to ${values.out}`);
       } else {
         io.out(report);
+      }
+      return EXIT.PASS;
+    }
+
+    if (command === 'triage') {
+      if (scanIds.length === 0) throw new ValidationError('at least one --scan-id is required');
+      const results: ScanResult[] = [];
+      for (const id of scanIds) results.push(await store.get(id));
+      const groups = correlate(results);
+      const config = rules.triage;
+
+      let model;
+      if (!values['no-ai']) {
+        const apiKey = envSecret('ANTHROPIC_API_KEY', env);
+        if (!apiKey) throw new ValidationError('ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY_FILE) is required for AI triage; pass --no-ai for correlation only');
+        model = claudeTriageModel({ model: config.model, effort: config.effort, timeoutSeconds: config.timeout_seconds, client: new Anthropic({ apiKey }) });
+      }
+      const report = await runTriage(groups, { ...(model ? { model, modelName: config.model } : {}), config, scanIds });
+
+      if (values.out) writeFileSync(values.out, `${JSON.stringify(report, null, 2)}\n`);
+      if (values.md) writeFileSync(values.md, renderTriageMarkdown(report));
+      const s = report.summary;
+      io.out(`Correlation: ${s.findings} findings in ${s.groups} groups (${s.correlated_groups} reported more than once)`);
+      io.out(
+        report.model
+          ? `AI triage (${report.model}, advisory): ${s.triaged} triaged - true positive ${s.verdicts.true_positive}, false positive ${s.verdicts.false_positive}, needs review ${s.verdicts.needs_review}; ${s.not_triaged} not triaged`
+          : 'AI triage: off (correlation only)'
+      );
+      for (const error of report.errors) io.err(`Triage error: ${error}`);
+      // The report is written either way; exit 2 lets CI mark the stage unstable.
+      return report.errors.length ? EXIT.ERROR : EXIT.PASS;
+    }
+
+    if (command === 'defectdojo') {
+      if (scanIds.length === 0) throw new ValidationError('at least one --scan-id is required');
+      if (!values.product || !values.engagement) throw new ValidationError('--product and --engagement are required');
+      const baseUrl = env['DEFECTDOJO_URL'];
+      const apiKey = envSecret('DEFECTDOJO_API_KEY', env);
+      if (!baseUrl || !apiKey) throw new ValidationError('DEFECTDOJO_URL and DEFECTDOJO_API_KEY (or DEFECTDOJO_API_KEY_FILE) are required');
+      const results: ScanResult[] = [];
+      for (const id of scanIds) results.push(await store.get(id));
+      let report: TriageReport | undefined;
+      if (values.triage) {
+        report = JSON.parse(readFileSync(values.triage, 'utf8')) as TriageReport;
+        if (report.schema_version !== 1 || !Array.isArray(report.groups)) throw new ValidationError(`${values.triage} is not a triage report`);
+      }
+      const context = {
+        productName: values.product,
+        productTypeName: values['product-type'] ?? 'DevSecOps',
+        engagementName: values.engagement,
+        ...(values.branch ? { branch: values.branch } : {}),
+        ...(values.commit ? { commit: values.commit } : {}),
+        ...(values['build-id'] ? { buildId: values['build-id'] } : {}),
+        ...(values['scm-uri'] ? { scmUri: values['scm-uri'] } : {})
+      };
+      const outcomes = await importToDefectDojo(new DefectDojoClient({ baseUrl, apiKey }), results, context, report);
+      for (const outcome of outcomes) {
+        io.out(
+          outcome.status === 'imported'
+            ? `DefectDojo: ${outcome.test_title} -> test ${outcome.test_id}: ${outcome.findings} findings, tags updated on ${outcome.tags_updated}`
+            : `DefectDojo: ${outcome.test_title} skipped (${outcome.reason})`
+        );
       }
       return EXIT.PASS;
     }

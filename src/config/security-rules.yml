@@ -153,3 +153,22 @@ dast:
   target_policy:
     allowed_hosts: []
     allowed_cidrs: []
+
+# Correlation and AI triage (devsecops-scan triage; Jenkins stage "AI triage + correlate").
+# Advisory only: the gate always evaluates the raw scan results, so a model that is wrong or
+# misled by text in the scanned code can never pass a build. Verdicts go to the triage report
+# and to DefectDojo as tags. Needs ANTHROPIC_API_KEY; without it, or with --no-ai, only the
+# deterministic correlation runs.
+triage:
+  model: claude-opus-5-5
+  effort: medium
+  # Groups below this severity are correlated but not sent to the model.
+  min_severity: low
+  # Most severe groups sent per build (cost cap); the rest are listed as not triaged.
+  max_groups: 100
+  batch_size: 15
+  # Send ~2 x context_lines of source around SAST findings, with likely secrets redacted.
+  # Secret findings never send code. false = rule, message and location only.
+  send_code: true
+  context_lines: 10
+  timeout_seconds: 300
