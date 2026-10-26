@@ -78,7 +78,7 @@ describe('devsecops-scan CLI', () => {
     const { io, out, err } = capture();
     expect(await main(['sast', '--target', appDir], io, { ...baseEnv, OPENGREP_PATH: file })).toBe(EXIT.PASS);
 
-    expect(err[0]).toMatch(/^\[opengrep-log\] \$ .*opengrep-log scan --json /);
+    expect(err).toContainEqual(expect.stringMatching(/^\[opengrep-log\] \$ .*opengrep-log scan --json /));
     expect(err).toEqual(expect.arrayContaining([
       '[opengrep-log] Scanning 3 files',
       '[opengrep-log] red line',
@@ -107,6 +107,76 @@ describe('devsecops-scan CLI', () => {
     const { io, err } = capture();
     expect(await main(['sast', '--target', appDir, '--quiet'], io, { ...baseEnv, OPENGREP_PATH: file })).toBe(EXIT.ERROR);
     expect(err.join('\n')).toMatch(/opengrep exited with code 7: [\s\S]*fatal: rule file is invalid/);
+  });
+
+  describe('language detection', () => {
+    const polyglot = tempDir('ws-poly-');
+    const polyEnv = { ...baseEnv, SCAN_WORKSPACE_ROOTS: polyglot };
+    mkdirSync(path.join(polyglot, 'api'));
+    mkdirSync(path.join(polyglot, 'node_modules', 'dep'), { recursive: true });
+    writeFileSync(path.join(polyglot, 'api', 'app.py'), 'print(1)');
+    writeFileSync(path.join(polyglot, 'api', 'util.py'), 'x = 1');
+    writeFileSync(path.join(polyglot, 'web.ts'), 'export {}');
+    writeFileSync(path.join(polyglot, 'Dockerfile'), 'FROM scratch');
+    writeFileSync(path.join(polyglot, 'notes.txt'), 'not code');
+    writeFileSync(path.join(polyglot, 'node_modules', 'dep', 'index.js'), 'module.exports = 1');
+
+    it('detect prints the languages that have rules on stdout and a table on stderr', async () => {
+      const out = path.join(tempDir('detect-'), 'languages.json');
+      const { io, out: stdout, err } = capture();
+      expect(await main(['detect', '--target', polyglot, '--out', out], io, polyEnv)).toBe(EXIT.PASS);
+      // node_modules is in sast.opengrep.exclude, so its JavaScript is not counted.
+      expect(stdout).toEqual(['dockerfile,python,typescript']);
+      expect(err.join('\n')).toMatch(/python\s+2 files/);
+      const report = JSON.parse(readFileSync(out, 'utf8'));
+      expect(report.languages[0]).toEqual({ name: 'python', files: 2 });
+      expect(report.scan_languages).toEqual(['dockerfile', 'python', 'typescript']);
+    });
+
+    it('detect lists a language without rules in the table but not on stdout', async () => {
+      const rules = path.join(tempDir('rules-'), 'rules.yml');
+      writeFileSync(rules, readFileSync(RULES_PATH, 'utf8').replace(/^ {6}python: .*\n/m, ''));
+      const { io, out, err } = capture();
+      expect(await main(['detect', '--target', polyglot, '--rules', rules], io, polyEnv)).toBe(EXIT.PASS);
+      expect(out).toEqual(['dockerfile,typescript']);
+      expect(err.join('\n')).toMatch(/python .*no rules configured/);
+    });
+
+    it('sast --languages runs only the common configs plus those languages', async () => {
+      const env = { ...polyEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-lang', { results: [], errors: [] }) };
+      expect(await main(['sast', '--target', polyglot, '--languages', 'python', '--scan-id', 'sast-lang-py', '--quiet'], capture().io, env)).toBe(EXIT.PASS);
+      const args = readFileSync(`${env.OPENGREP_PATH}.args`, 'utf8');
+      expect(args).toMatch(/--config \/opt\/opengrep-rules\/python /);
+      expect(args).toMatch(/--config \/opt\/opengrep-rules\/generic\/secrets /);
+      expect(args).not.toMatch(/opengrep-rules\/(typescript|javascript|dockerfile)/);
+      expect(JSON.parse(readFileSync(path.join(reports, 'sast-lang-py', 'result.json'), 'utf8')).metadata.languages).toEqual(['python']);
+    });
+
+    it('sast detects the languages itself when --languages is omitted', async () => {
+      const env = { ...polyEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-auto', { results: [], errors: [] }) };
+      const { io, err } = capture();
+      expect(await main(['sast', '--target', polyglot], io, env)).toBe(EXIT.PASS);
+      expect(err).toContain('[sast] languages: dockerfile, python, typescript');
+      // typescript also pulls in the JavaScript rules; each config is passed once.
+      const configs = readFileSync(`${env.OPENGREP_PATH}.args`, 'utf8').match(/--config \S+/g) ?? [];
+      expect(configs.filter((c) => c.endsWith('/javascript'))).toHaveLength(1);
+      expect(configs).toContain('--config /opt/opengrep-rules/dockerfile');
+    });
+
+    it('sast --languages "" runs only the common configs', async () => {
+      const env = { ...polyEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-none', { results: [], errors: [] }) };
+      expect(await main(['sast', '--target', polyglot, '--languages', '', '--quiet'], capture().io, env)).toBe(EXIT.PASS);
+      const configs = readFileSync(`${env.OPENGREP_PATH}.args`, 'utf8').match(/--config \S+/g) ?? [];
+      expect(configs).toHaveLength(2);
+    });
+
+    it('refuses an unknown language and --languages on other scan types', async () => {
+      const env = { ...polyEnv, OPENGREP_PATH: path.join(bin, 'must-not-run') };
+      const { io, err } = capture();
+      expect(await main(['sast', '--target', polyglot, '--languages', 'cobol'], io, env)).toBe(EXIT.ERROR);
+      expect(err.join('\n')).toMatch(/No rules configured for language\(s\): cobol/);
+      expect(await main(['sca', '--target', polyglot, '--languages', 'python'], capture().io, env)).toBe(EXIT.ERROR);
+    });
   });
 
   it('exits 2 when the scanner prints invalid JSON', async () => {

@@ -92,6 +92,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp   # 4
 ## The `devsecops-scan` CLI
 
 ```
+devsecops-scan detect --target <dir> [--format list|json] [--out file]
 devsecops-scan <sast|sca|container|dast> --target <path|image|url> [options]
 devsecops-scan gate   --scan-id <id> [--scan-id <id> ...]
 devsecops-scan report --scan-id <id> [...] [--format markdown|json|sarif] [--out file]
@@ -102,10 +103,20 @@ devsecops-scan report --scan-id <id> [...] [--format markdown|json|sarif] [--out
 | `--target` | `sast`/`sca`: a directory inside an allowed workspace root. `container`: an image reference. `dast`: an http(s) URL. |
 | `--tool` | Overrides the scan type's `default_tool` (only `sca` has a choice: `osv-scanner` or `trivy`). |
 | `--scan-id` | Explicit id (`[a-z0-9_-]`, 3–128 characters). Generated when omitted. Existing ids are never overwritten. |
+| `--languages` | `sast` only. Comma-separated languages whose rule sets to run (the output of `detect`), `all`, or `""` for the common rules only. Omitted: `sast` detects the languages itself. |
 | `--dast-mode` | `baseline` (Nuclei HTTP templates against the target) or `full` (adds a Katana crawl and the fuzzing templates on crawled URLs with parameters; active attacks, only against test environments). |
 | `--no-fail` | Exit 0 on a policy FAIL so later scans still run; a single `gate` decides at the end. |
 | `--quiet` | Do not stream the scanners' own logs, and run each scanner in its quiet mode. |
 | `--rules`, `--reports-dir` | Override `SECURITY_RULES_PATH` and `REPORTS_DIR`. |
+
+**Language detection:** `detect` walks the target (skipping `sast.opengrep.exclude` directories and `.git`, without following symlinks) and counts files per language by extension (`Dockerfile*` counts as `dockerfile`). It prints a per-language table to stderr. On stdout it prints the comma-separated languages that have rule sets in `sast.opengrep.language_configs`, ready for `--languages`; `--format json` prints the full detection instead, and `--out` also writes the JSON to a file. A detected language without rules is shown in the table but not scanned with language rules. For example:
+
+```bash
+LANGS=$(docker compose run --rm -T scanner devsecops-scan detect --target /workspace/src)
+docker compose run --rm scanner devsecops-scan sast --target /workspace/src --languages "$LANGS"
+```
+
+The languages used are recorded in the SAST result's `metadata.languages`.
 
 **Scanner logs:** while a scan runs, the CLI streams each scanner's own log to stderr, one line at a time with the tool name as a prefix, together with the exact command line and the exit status:
 
@@ -149,7 +160,11 @@ sast:
   thresholds: { critical: 0, high: 0, medium: null, low: null }   # overrides global; null = report only
   opengrep:
     taint_intrafile: true
-    configs: [opengrep/baseline.yml, "${OPENGREP_RULES_DIR}/python", ...]
+    configs: [opengrep/baseline.yml, "${OPENGREP_RULES_DIR}/generic/secrets"]   # always run
+    language_configs:                                                           # only for scanned languages
+      python: ["${OPENGREP_RULES_DIR}/python"]
+      typescript: ["${OPENGREP_RULES_DIR}/javascript", "${OPENGREP_RULES_DIR}/typescript"]
+      # ... one entry per language in opengrep-rules
 dast:
   thresholds: { critical: 0, high: 0, medium: 0 }            # reflected XSS / open redirect are medium
   mode: baseline
@@ -171,7 +186,7 @@ The gate fails when any of the following is true:
 
 **Default thresholds and tuning:**
 
-- **SAST:** only `critical` and `high` gate the build. opengrep-rules is broad and on a typical codebase reports many medium/low findings that are false positives (for example `path-join-resolve-traversal` on guarded code), so `medium` and `low` are `null`: recorded in the reports and SARIF, not enforced. Trim `configs` to the languages you use, suppress reviewed findings inline (`// nosemgrep: <rule-id>`), then set `medium` to a number to start enforcing it.
+- **SAST:** only `critical` and `high` gate the build. opengrep-rules is broad and on a typical codebase reports many medium/low findings that are false positives (for example `path-join-resolve-traversal` on guarded code), so `medium` and `low` are `null`: recorded in the reports and SARIF, not enforced. Only the rule sets of the detected languages run; remove a `language_configs` entry to stop scanning that language. Suppress reviewed findings inline (`// nosemgrep: <rule-id>`), then set `medium` to a number to start enforcing it.
 - **DAST:** Nuclei rates confirmed reflected XSS and open redirects as `medium`, so `medium: 0` fails the build on them. `info` findings (technology fingerprints, missing headers) are never gated.
 - **SCA and container:** unchanged (`critical`/`high` at 0; SCA allows up to 3 medium and 10 low).
 
@@ -183,7 +198,7 @@ The gate fails when any of the following is true:
 2. Install the plugins Docker Pipeline, Timestamper and Warnings Next Generation.
 3. Create a Pipeline job from SCM and set the parameters (`SCANNER_IMAGE`, `IMAGE_REF`, `DAST_TARGET_URL`, `DAST_MODE`).
 
-The pipeline runs Opengrep, OSV-Scanner and Trivy in parallel, plus the Trivy image scan when `IMAGE_REF` is set. DAST runs when `DAST_TARGET_URL` is set. It needs no credentials and no shared daemon. The stage `devsecops-scan gate` fails the build on exit code 1 or 2. Reports are archived and the SARIF files are published with Warnings NG.
+A pre-check stage runs `devsecops-scan detect` on the checkout and passes the languages it finds to the SAST stage (`--languages`), so Opengrep only loads the rule sets for those languages plus the common rules. The detection is archived as `security-reports/languages-<prefix>.json`. The pipeline then runs Opengrep, OSV-Scanner and Trivy in parallel, plus the Trivy image scan when `IMAGE_REF` is set. DAST runs when `DAST_TARGET_URL` is set. It needs no credentials and no shared daemon. The stage `devsecops-scan gate` fails the build on exit code 1 or 2. Reports are archived and the SARIF files are published with Warnings NG.
 
 **Results for the MCP server:** set `MCP_REPORTS_DIR` (a Jenkins global or node environment variable) to a directory that is mounted on the agent and that the MCP server also mounts. After each build, the `post` step copies that build's scan directories there. It copies to a temporary name and then renames, so the MCP server never sees a partial result, and it never overwrites. Without the variable, results are only archived in Jenkins. See [deployment guide §5.4](docs/DEPLOYMENT-GUIDE.md#54-deliver-results-to-the-mcp-server).
 

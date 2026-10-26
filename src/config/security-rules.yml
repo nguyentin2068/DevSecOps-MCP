@@ -37,14 +37,40 @@ sast:
     # The scanner image ships opengrep-rules at a pinned commit in ${OPENGREP_RULES_DIR}.
     # Registry packs (p/...) are passed through as-is but are covered by the Semgrep Rules
     # License; prefer local rules you control.
+    # Always run, whatever the code is written in:
     configs:
       - opengrep/baseline.yml
-      - ${OPENGREP_RULES_DIR}/javascript
-      - ${OPENGREP_RULES_DIR}/typescript
-      - ${OPENGREP_RULES_DIR}/python
-      - ${OPENGREP_RULES_DIR}/java
-      - ${OPENGREP_RULES_DIR}/go
       - ${OPENGREP_RULES_DIR}/generic/secrets
+    # Run only for the languages being scanned. `devsecops-scan detect` finds them from file
+    # extensions (the Jenkins pre-check stage passes them on with --languages); without
+    # --languages, `sast` detects them itself. A detected language with no entry here is
+    # reported but not scanned with language rules. Remove an entry to stop scanning it.
+    language_configs:
+      bash: ["${OPENGREP_RULES_DIR}/bash"]
+      c: ["${OPENGREP_RULES_DIR}/c"]
+      clojure: ["${OPENGREP_RULES_DIR}/clojure"]
+      csharp: ["${OPENGREP_RULES_DIR}/csharp"]
+      dockerfile: ["${OPENGREP_RULES_DIR}/dockerfile", "${OPENGREP_RULES_DIR}/generic/dockerfile"]
+      elixir: ["${OPENGREP_RULES_DIR}/elixir"]
+      go: ["${OPENGREP_RULES_DIR}/go"]
+      html: ["${OPENGREP_RULES_DIR}/html"]
+      java: ["${OPENGREP_RULES_DIR}/java"]
+      javascript: ["${OPENGREP_RULES_DIR}/javascript"]
+      json: ["${OPENGREP_RULES_DIR}/json"]
+      kotlin: ["${OPENGREP_RULES_DIR}/kotlin"]
+      ocaml: ["${OPENGREP_RULES_DIR}/ocaml"]
+      php: ["${OPENGREP_RULES_DIR}/php"]
+      python: ["${OPENGREP_RULES_DIR}/python"]
+      ruby: ["${OPENGREP_RULES_DIR}/ruby"]
+      rust: ["${OPENGREP_RULES_DIR}/rust"]
+      scala: ["${OPENGREP_RULES_DIR}/scala"]
+      solidity: ["${OPENGREP_RULES_DIR}/solidity"]
+      swift: ["${OPENGREP_RULES_DIR}/swift"]
+      terraform: ["${OPENGREP_RULES_DIR}/terraform"]
+      # Most JavaScript rules also match TypeScript.
+      typescript: ["${OPENGREP_RULES_DIR}/javascript", "${OPENGREP_RULES_DIR}/typescript"]
+      yaml: ["${OPENGREP_RULES_DIR}/yaml"]
+    # Also skipped by language detection (plain directory names only).
     exclude:
       - security-reports
       - node_modules

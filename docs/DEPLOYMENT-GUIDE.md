@@ -238,10 +238,11 @@ Create the job: **New Item → Pipeline → Pipeline script from SCM** and point
 ### 5.3 What a run does
 
 1. **Prepare**: computes a unique scan id prefix from the job name and build number.
-2. **Scans** (parallel): Opengrep, OSV-Scanner, Trivy fs, plus Trivy image if `IMAGE_REF` is set. Each runs with `--no-fail`, so all of them finish.
-3. **DAST** if `DAST_TARGET_URL` is set.
-4. **Security gate**: writes `security-reports/summary-<prefix>.md`, then `devsecops-scan gate` fails the build on exit 1 (policy) or 2 (scanner error or missing results).
-5. **Post**: archives `security-reports/**`, publishes the SARIF files in Warnings NG, and optionally copies the results to the MCP server (next step).
+2. **Pre-check: detect languages**: `devsecops-scan detect` counts the files per language in the checkout, prints the table to the console and stores `security-reports/languages-<prefix>.json`. The languages that have rule sets in `sast.opengrep.language_configs` are kept in `SCAN_LANGUAGES`.
+3. **Scans** (parallel): Opengrep (with `--languages "$SCAN_LANGUAGES"`: only the rule sets of the detected languages, plus the common baseline and secrets rules), OSV-Scanner, Trivy fs, plus Trivy image if `IMAGE_REF` is set. Each runs with `--no-fail`, so all of them finish.
+4. **DAST** if `DAST_TARGET_URL` is set.
+5. **Security gate**: writes `security-reports/summary-<prefix>.md`, then `devsecops-scan gate` fails the build on exit 1 (policy) or 2 (scanner error or missing results).
+6. **Post**: archives `security-reports/**`, publishes the SARIF files in Warnings NG, and optionally copies the results to the MCP server (next step).
 
 > OSV-Scanner exits with code 127 when it cannot reach `api.osv.dev`. The stage then fails (exit 2) by design: the gate never passes on missing evidence. Allow that egress, or replace the OSV stage with Trivy.
 
@@ -425,7 +426,8 @@ docker run --rm -v $PWD/.devsecops:/rules:ro $REGISTRY/devsecops-scanner:$VERSIO
 |---|---|---|
 | `global_policy.enforcement_level` | `strict` | Start with `permissive` for one or two weeks to see the results without failing builds, then switch to `strict`. |
 | `sast.thresholds` | critical/high 0; medium/low not gated | Keep. After triage, set `medium` to a number. Suppress reviewed false positives inline: `// nosemgrep: <rule-id>` with a reason. |
-| `sast.opengrep.configs` | baseline + JS/TS/Python/Java/Go + secrets | Remove languages you don't use (faster, less noise). Add your own rule files. |
+| `sast.opengrep.configs` | baseline + secrets | Rules that always run. Add your own rule files here. |
+| `sast.opengrep.language_configs` | one entry per language in opengrep-rules | Only the detected languages run. Remove a language to stop scanning it; point an entry at your own rules to replace the defaults. |
 | `sca.thresholds` | critical/high 0; medium 3; low 10 | Adjust to your patching SLA. |
 | `container.trivy.ignore_unfixed` | `true` | Keep, so the gate only fails on findings you can fix. |
 | `dast.thresholds` | critical/high/medium 0 | Keep. Reflected XSS and open redirect are `medium`. |

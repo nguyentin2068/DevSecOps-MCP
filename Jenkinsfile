@@ -53,13 +53,30 @@ pipeline {
       }
     }
 
+    stage('Pre-check: detect languages') {
+      // Finds the languages in the checked-out code from file extensions. The per-language
+      // table is printed to the console; stdout is the comma-separated list of languages that
+      // have rules in the policy (sast.opengrep.language_configs), which the SAST stage scans.
+      // The full detection is archived with the reports.
+      steps {
+        script {
+          env.SCAN_LANGUAGES = sh(
+            returnStdout: true,
+            script: 'devsecops-scan detect --target . --out "$REPORTS_DIR/languages-$SCAN_PREFIX.json"'
+          ).trim()
+          echo "SAST languages: ${env.SCAN_LANGUAGES ?: 'none detected (common rules only)'}"
+        }
+      }
+    }
+
     stage('Scans') {
       // --no-fail records results without failing the stage, so every scanner runs and the
       // single gate below decides the build. A scanner error still exits 2 and fails the stage.
       parallel {
         stage('SAST: Opengrep') {
           steps {
-            sh 'devsecops-scan sast --tool opengrep --target . --scan-id "sast-opengrep-$SCAN_PREFIX" --no-fail'
+            // Only the rule sets for the detected languages, plus the common rules (secrets, baseline).
+            sh 'devsecops-scan sast --tool opengrep --target . --languages "$SCAN_LANGUAGES" --scan-id "sast-opengrep-$SCAN_PREFIX" --no-fail'
           }
         }
         stage('SCA: OSV-Scanner') {
