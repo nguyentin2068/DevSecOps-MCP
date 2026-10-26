@@ -25,6 +25,7 @@ Jenkins / K8s Job ── devsecops-scan ──► Opengrep · OSV-Scanner · Tri
 
 - [docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md): step-by-step setup for Docker Compose, Jenkins and Kubernetes, policy decisions before go-live, a verification checklist and operations.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): design, data flow and threat model.
+- [docs/JENKINS-SETUP.md](docs/JENKINS-SETUP.md) (Vietnamese): set up a Jenkins in Docker on one machine (Linux or Windows/WSL2) and run the pipeline end to end, with troubleshooting.
 
 ## Contents
 
@@ -203,7 +204,7 @@ The gate fails when any of the following is true:
 
 ## Jenkins
 
-[`Jenkinsfile`](Jenkinsfile) is a ready-to-adapt pipeline:
+[`Jenkinsfile`](Jenkinsfile) is a ready-to-adapt pipeline. For a step-by-step lab setup (Jenkins in Docker, plugins, first build), see [docs/JENKINS-SETUP.md](docs/JENKINS-SETUP.md).
 
 1. Build and push the scanner image: `docker build --target scanner -t registry.example.com/devsecops-scanner:2.1.0 .`
 2. Install the plugins Docker Pipeline, Timestamper and Warnings Next Generation.
