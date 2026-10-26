@@ -2,18 +2,20 @@
 import { writeFileSync } from 'fs';
 import { parseArgs } from 'util';
 import { defaultRulesPath, loadRules } from './core/config';
-import { ValidationError } from './core/guards';
+import { resolveWorkspacePath, ValidationError, workspaceRootsFromEnv } from './core/guards';
+import { detectLanguages } from './core/languages';
 import { errorMessage } from './core/logger';
 import { evaluatePolicy, PolicyDecision } from './core/policy';
 import { renderReport, ReportFormat } from './core/report';
 import { ReportStore } from './core/report-store';
-import { runScan } from './core/scan-runner';
+import { languageDetectOptions, runScan, scannableLanguages } from './core/scan-runner';
 import { SCAN_TYPES, ScanResult, ScanType } from './core/types';
 
 /** Exit codes: 0 = policy PASS/WARN, 1 = policy FAIL, 2 = scanner/usage/config error. */
 export const EXIT = { PASS: 0, POLICY_FAIL: 1, ERROR: 2 } as const;
 
 const USAGE = `Usage:
+  devsecops-scan detect --target <dir> [--format list|json] [--out file]
   devsecops-scan <sast|sca|container|dast> --target <path|image|url> [options]
   devsecops-scan gate   --scan-id <id> [--scan-id <id> ...] [options]
   devsecops-scan report --scan-id <id> [--scan-id <id> ...] [--format markdown|json|sarif] [--out file]
@@ -22,9 +24,16 @@ Scan options:
   --target <value>        sast/sca: directory inside the workspace; container: image ref; dast: URL
   --tool <name>           sast: opengrep, sca: osv-scanner|trivy, container: trivy, dast: nuclei
   --scan-id <id>          explicit id ([a-z0-9_-], 3-128 chars); generated when omitted
+  --languages <list>      sast: comma-separated languages to scan (from "detect"), "all", or "" for
+                          common rules only; omitted = detect them from the target
   --dast-mode <mode>      baseline|full: full adds nuclei's fuzzing (DAST) templates; test environments only
   --no-fail               always exit 0 on a policy FAIL (scanner errors still exit 2)
   --quiet                 do not stream the scanners' own logs to stderr (run them in quiet mode)
+
+Detect options:
+  --format <fmt>          list (default): comma-separated languages that have rules, for --languages;
+                          json: full detection. A summary table always goes to stderr.
+  --out <file>            also write the full detection as JSON to this file
 
 Common options:
   --rules <file>          policy file (default: $SECURITY_RULES_PATH or src/config/security-rules.yml)
@@ -63,11 +72,12 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
         tool: { type: 'string' },
         'scan-id': { type: 'string', multiple: true },
         'dast-mode': { type: 'string' },
+        languages: { type: 'string' },
         'no-fail': { type: 'boolean', default: false },
         quiet: { type: 'boolean', default: false },
         rules: { type: 'string' },
         'reports-dir': { type: 'string' },
-        format: { type: 'string', default: 'markdown' },
+        format: { type: 'string' },
         out: { type: 'string' },
         help: { type: 'boolean', short: 'h', default: false }
       }
@@ -89,9 +99,32 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
     const store = values['reports-dir'] ? new ReportStore(values['reports-dir']) : ReportStore.fromEnv(env);
     const scanIds = values['scan-id'] ?? [];
 
+    if (command === 'detect') {
+      if (!values.target) throw new ValidationError('--target is required');
+      const format = values.format ?? 'list';
+      if (format !== 'list' && format !== 'json') throw new ValidationError('--format must be list or json for detect');
+      const target = await resolveWorkspacePath(values.target, workspaceRootsFromEnv(env));
+      const detection = await detectLanguages(target, languageDetectOptions(rules));
+      const scan = scannableLanguages(detection, rules);
+      const report = { target, ...detection, scan_languages: scan };
+
+      io.err(`Languages in ${target} (${detection.files_scanned} files${detection.truncated ? ', walk truncated' : ''}):`);
+      if (detection.languages.length === 0) io.err('  none detected');
+      for (const { name, files } of detection.languages) {
+        io.err(`  ${name.padEnd(12)} ${String(files).padStart(7)} files${scan.includes(name) ? '' : '  (no rules configured, not scanned)'}`);
+      }
+      io.err(`SAST languages: ${scan.length ? scan.join(',') : 'none (common rules only)'}`);
+
+      if (values.out) writeFileSync(values.out, `${JSON.stringify(report, null, 2)}\n`);
+      io.out(format === 'json' ? JSON.stringify(report, null, 2) : scan.join(','));
+      return EXIT.PASS;
+    }
+
     if ((SCAN_TYPES as readonly string[]).includes(command)) {
       if (!values.target) throw new ValidationError('--target is required');
       if (scanIds.length > 1) throw new ValidationError('a scan accepts at most one --scan-id');
+      if (values.languages !== undefined && command !== 'sast') throw new ValidationError('--languages applies to sast only');
+      const languages = values.languages?.split(',').map((language) => language.trim().toLowerCase()).filter(Boolean);
       const dastMode = values['dast-mode'];
       if (dastMode !== undefined && dastMode !== 'baseline' && dastMode !== 'full') {
         throw new ValidationError('--dast-mode must be baseline or full');
@@ -103,7 +136,8 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
           target: values.target,
           ...(values.tool ? { tool: values.tool } : {}),
           ...(scanIds[0] ? { scanId: scanIds[0] } : {}),
-          ...(dastMode ? { dastMode } : {})
+          ...(dastMode ? { dastMode } : {}),
+          ...(languages ? { languages } : {})
         },
         // Scanner logs go to stderr with a [tool] prefix; stdout keeps only the CLI's own summary.
         { rules, store, env, ...(values.quiet ? {} : { toolLog: io.err }) }
@@ -134,7 +168,7 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
         return decisionExit(decision, values['no-fail']);
       }
 
-      const format = values.format as ReportFormat;
+      const format = (values.format ?? 'markdown') as ReportFormat;
       if (!['markdown', 'json', 'sarif'].includes(format)) throw new ValidationError('--format must be markdown, json or sarif');
       const report = renderReport(results, decision, format);
       if (values.out) {

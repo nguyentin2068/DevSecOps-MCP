@@ -32,6 +32,14 @@ describe('security rules loading', () => {
     expect(() => parseRules('version: "2.0"\nglobal_policy: {}\nsast: { opengrep: { configs: ["--dangerous"] } }\n')).toThrow();
   });
 
+  it('validates per-language rule sets', () => {
+    const rules = parseRules('version: "2.0"\nglobal_policy: {}\nsast: { opengrep: { language_configs: { python: ["rules/py"] } } }\n');
+    expect(rules.sast.opengrep.language_configs).toEqual({ python: ['rules/py'] });
+    expect(() => parseRules('version: "2.0"\nglobal_policy: {}\nsast: { opengrep: { language_configs: { python: ["--x"] } } }\n')).toThrow();
+    expect(() => parseRules('version: "2.0"\nglobal_policy: {}\nsast: { opengrep: { language_configs: { Python: ["a"] } } }\n')).toThrow();
+    expect(() => parseRules('version: "2.0"\nglobal_policy: {}\nsast: { opengrep: { language_configs: { python: [] } } }\n')).toThrow();
+  });
+
   it('rejects invalid YAML', () => {
     expect(() => parseRules('version: [unclosed')).toThrow(/invalid YAML/);
   });

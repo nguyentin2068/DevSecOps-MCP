@@ -25,7 +25,15 @@ export interface SecurityRules {
     thresholds: Thresholds;
   };
   sast: ScanPolicy & {
-    opengrep: { timeout_seconds: number; taint_intrafile: boolean; configs: string[]; exclude: string[] };
+    opengrep: {
+      timeout_seconds: number;
+      taint_intrafile: boolean;
+      /** Always run, whatever languages the code uses. */
+      configs: string[];
+      /** Extra rule sets per language, run only when that language is scanned. */
+      language_configs: Record<string, string[]>;
+      exclude: string[];
+    };
   };
   sca: ScanPolicy & {
     osv_scanner: { timeout_seconds: number };
@@ -82,6 +90,7 @@ const schema = Joi.object<SecurityRules>({
       timeout_seconds: timeout.default(900),
       taint_intrafile: Joi.boolean().default(true),
       configs: optionList.min(1).default(['opengrep/baseline.yml']),
+      language_configs: Joi.object().pattern(/^[a-z][a-z0-9_-]{0,31}$/, optionList.min(1)).default({}),
       exclude: optionList.default([])
     }).default()
   }).default(),

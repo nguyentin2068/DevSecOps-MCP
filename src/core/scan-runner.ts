@@ -7,6 +7,7 @@ import {
   ValidationError,
   workspaceRootsFromEnv
 } from './guards';
+import { detectLanguages, LanguageDetection } from './languages';
 import { errorMessage, logger } from './logger';
 import { evaluatePolicy, PolicyDecision } from './policy';
 import { ToolLog } from './process';
@@ -28,6 +29,11 @@ export interface ScanRequest {
   scanId?: string;
   /** Overrides dast.mode from the rules (full adds the nuclei fuzzing pass). */
   dastMode?: 'baseline' | 'full';
+  /**
+   * sast only: languages whose rule sets (sast.opengrep.language_configs) to run, or ['all'].
+   * Omitted = detect them from the target's files. An empty list runs only the common configs.
+   */
+  languages?: string[];
 }
 
 export interface ScanContext {
@@ -54,6 +60,30 @@ function resolveTool(request: ScanRequest, rules: SecurityRules): string {
     );
   }
   return tool;
+}
+
+/** Languages that have rule sets in the policy, in a stable order. */
+export function scannableLanguages(detection: LanguageDetection, rules: SecurityRules): string[] {
+  return detection.languages.map((language) => language.name).filter((name) => name in rules.sast.opengrep.language_configs).sort();
+}
+
+export function languageDetectOptions(rules: SecurityRules): { excludeDirs: string[] } {
+  return { excludeDirs: rules.sast.opengrep.exclude };
+}
+
+async function sastLanguages(requested: string[] | undefined, target: string, rules: SecurityRules): Promise<string[]> {
+  const known = Object.keys(rules.sast.opengrep.language_configs).sort();
+  if (requested === undefined) {
+    return scannableLanguages(await detectLanguages(target, languageDetectOptions(rules)), rules);
+  }
+  if (requested.includes('all')) return known;
+  const unknown = requested.filter((language) => !known.includes(language));
+  if (unknown.length) {
+    throw new ValidationError(
+      `No rules configured for language(s): ${unknown.join(', ')}. Known: ${known.join(', ') || '(none)'} (sast.opengrep.language_configs)`
+    );
+  }
+  return Array.from(new Set(requested)).sort();
 }
 
 /** Validate the target and build the scanner call. Validation errors surface before anything runs. */
@@ -131,12 +161,18 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
 
   if (request.scanType === 'sast') {
     const opengrep = rules.sast.opengrep;
+    const languages = await sastLanguages(request.languages, target, rules);
     // Opengrep runs with cwd=target, so local rule paths are made absolute here, relative to the rules file.
-    const configs = opengrep.configs.map((config) => (REGISTRY_CONFIG.test(config) ? config : resolveConfigPath(config, rules, env)));
+    const entries = [...opengrep.configs, ...languages.flatMap((language) => opengrep.language_configs[language] ?? [])];
+    const configs = Array.from(
+      new Set(entries.map((config) => (REGISTRY_CONFIG.test(config) ? config : resolveConfigPath(config, rules, env))))
+    );
+    logger.info('SAST languages', { languages, configs: configs.length });
+    log?.(`[sast] languages: ${languages.length ? languages.join(', ') : 'none (common rules only)'}`);
     return {
       target,
-      run: () =>
-        runOpengrep(target, {
+      run: async () => {
+        const output = await runOpengrep(target, {
           bin: env['OPENGREP_PATH'] || 'opengrep',
           configs,
           exclude: opengrep.exclude,
@@ -144,7 +180,9 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
           taintIntrafile: opengrep.taint_intrafile,
           env,
           log
-        })
+        });
+        return { ...output, metadata: { ...output.metadata, languages } };
+      }
     };
   }
 
