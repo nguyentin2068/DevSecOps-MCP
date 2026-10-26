@@ -7,7 +7,7 @@ import { errorMessage, logger } from '../core/logger';
 import { ReportStore } from '../core/report-store';
 import { callTool, ToolContext, TOOL_DEFINITIONS } from './tools';
 
-export const SERVER_INFO = { name: 'devsecops-mcp-server', version: '2.0.0' };
+export const SERVER_INFO = { name: 'devsecops-mcp-server', version: '2.1.0' };
 
 export function createToolContext(env: NodeJS.ProcessEnv = process.env): ToolContext {
   return {

@@ -18,4 +18,4 @@ resources:
 images:
   - name: devsecops-mcp
     newName: registry.example.com/devsecops-mcp
-    newTag: "2.0.0"
+    newTag: "2.1.0"

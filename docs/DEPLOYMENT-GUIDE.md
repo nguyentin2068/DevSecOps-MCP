@@ -50,6 +50,7 @@ The scanners never talk to the MCP server, and the MCP server never runs scans. 
 | Kubernetes + `kubectl` (with Kustomize) | 1.27+ | Topology C |
 | Jenkins | 2.4xx LTS | Topologies B and C (optional for C) |
 | Node.js | 20+ | Only for local development; the images include their own runtime |
+| Windows only: WSL2 + Docker Desktop (WSL 2 engine) | current | Running topology A on a Windows workstation ([4.6](#46-windows-workstation-wsl2)) |
 
 ### Resources
 
@@ -187,12 +188,13 @@ The port binds to `127.0.0.1` only. To expose it to other machines, put a TLS re
 ```bash
 docker compose build scanner     # or tag a pulled image as devsecops-scanner:$IMAGE_TAG
 
-docker compose run --rm scanner devsecops-scan sast --target /workspace/src
+docker compose run --rm -T scanner devsecops-scan detect --target /workspace/src   # languages found
+docker compose run --rm scanner devsecops-scan sast --target /workspace/src             # detects the languages itself
 docker compose run --rm scanner devsecops-scan sca  --target /workspace/src             # OSV-Scanner
 docker compose run --rm scanner devsecops-scan sca  --target /workspace/src --tool trivy
 ```
 
-Results appear in `./security-reports/<scan_id>/` (and, if it runs, the MCP server sees them immediately). Without MCP, read them with `docker compose run --rm scanner devsecops-scan report --scan-id <id> --format markdown` or open the `.sarif` files in your IDE.
+Each scanner's own log is streamed to the terminal with a `[tool]` prefix; add `--quiet` to hide it, or `-e LOG_LEVEL=warn` to hide the CLI's JSON log lines. Results appear in `./security-reports/<scan_id>/` (and, if it runs, the MCP server sees them immediately). Without MCP, read them with `docker compose run --rm scanner devsecops-scan report --scan-id <id> --format markdown` or open the `.sarif` files in your IDE.
 
 ### 4.4 Try DAST against the demo app
 
@@ -215,6 +217,27 @@ docker run --rm -u 1000:1000 \
   -v $PWD/security-reports:/workspace/security-reports \
   $REGISTRY/devsecops-scanner:$VERSION \
   devsecops-scan sast --target /workspace/src
+```
+
+### 4.6 Windows workstation (WSL2)
+
+The scanner image is Linux x86_64 (the `Dockerfile` downloads Opengrep's x86_64 build, so ARM machines are not supported), so on Windows run everything inside WSL2 with Docker Desktop's WSL 2 engine:
+
+1. Install WSL2 and Ubuntu from an elevated PowerShell: `wsl --install -d Ubuntu`. The first user you create gets uid 1000, which matches the scanner, so `security-reports` needs no `chown`.
+2. Install Docker Desktop, enable **Use the WSL 2 based engine**, and under **Resources → WSL integration** turn on your Ubuntu distribution. If `docker` is "not found in this WSL 2 distro", that switch is off.
+3. Give WSL enough memory for the image build (`%UserProfile%\.wslconfig`: `[wsl2]` / `memory=6GB`, then `wsl --shutdown`).
+4. Clone the repository inside WSL (for example `~/DevSecOps-MCP`), not under `C:\` or `/mnt/c`: bind mounts from the Windows drive are much slower, and Git for Windows may convert line endings. Put the projects you scan in WSL too.
+5. Follow 4.1–4.5 in the Ubuntu terminal. From Windows, the results are at `\\wsl$\<distribution>\home\<user>\DevSecOps-MCP\security-reports`.
+
+If `wsl --install` fails with `Wsl/InstallDistro/WININET_E_TIMEOUT` while `curl.exe` can reach GitHub, `wsl.exe` is most likely tripping over the system proxy settings (WinINet), which `curl.exe` does not use. Fix the proxy, or install from a file instead. In PowerShell, run one line at a time:
+
+```powershell
+wsl --install --no-distribution
+curl.exe -sL -o "$env:TEMP\distros.json" https://raw.githubusercontent.com/microsoft/WSL/master/distributions/DistributionInfo.json
+$u = (Get-Content "$env:TEMP\distros.json" -Raw | ConvertFrom-Json).ModernDistributions.Ubuntu | Where-Object Default
+mkdir C:\WSL -Force; curl.exe -fL -o C:\WSL\ubuntu.wsl $u.Amd64Url.Url
+(Get-FileHash C:\WSL\ubuntu.wsl -Algorithm SHA256).Hash; $u.Amd64Url.Sha256   # must match (ignore the 0x)
+wsl --install --from-file C:\WSL\ubuntu.wsl
 ```
 
 ---
@@ -506,7 +529,9 @@ Run through this after the first deployment and after every upgrade.
 
 - [ ] `docker run --rm <scanner> sh -c 'opengrep --version; trivy --version; nuclei -version'` prints the expected versions ([2](#2-build-and-publish-the-images)).
 - [ ] `GET /health` returns `{"status":"ok"}`; `POST /mcp` without a token returns `401`.
-- [ ] A SAST scan of a deliberately vulnerable sample fails the gate (exit 1); a clean directory passes (exit 0).
+- [ ] `devsecops-scan detect` lists the languages of a sample project, and the Jenkins console shows the `Pre-check: detect languages` table.
+- [ ] A SAST scan of a deliberately vulnerable sample fails the gate (exit 1); a clean directory passes (exit 0). `sast --languages all` loads every rule set without errors.
+- [ ] SAST findings in `result.json` have `rule_id` values `sast-<language>-<NNNN>` and no `metadata.unmapped_rule_ids` (unless you added your own rule files).
 - [ ] An SCA scan downloads the Trivy DB (or uses your mirror) and completes. An OSV scan completes, which proves `api.osv.dev` is reachable.
 - [ ] `devsecops-scan dast --target http://169.254.169.254/` is refused (SSRF guard). Your staging URL is accepted.
 - [ ] After a Jenkins build, the scan directories appear in the MCP reports directory, and `list_scans` shows them.

@@ -1,12 +1,9 @@
 {
-  "name": "vulnerable-dependencies-test",
+  "name": "devsecops-test-samples",
   "version": "1.0.0",
-  "description": "Test package with intentionally vulnerable dependencies for SCA testing",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "test": "echo \"SCA test package\""
-  },
+  "private": true,
+  "description": "Deliberately vulnerable dependencies for trying the SCA scanners (OSV-Scanner, Trivy). Never install or deploy.",
+  "license": "MIT",
   "dependencies": {
     "express": "4.16.1",
     "lodash": "4.17.4",
@@ -26,14 +23,5 @@
     "ms": "2.0.0",
     "mime": "1.4.1",
     "fresh": "0.5.2"
-  },
-  "keywords": [
-    "vulnerable",
-    "dependencies",
-    "security",
-    "testing",
-    "sca"
-  ],
-  "author": "Security Test",
-  "license": "MIT"
+  }
 }
