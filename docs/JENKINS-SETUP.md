@@ -1,6 +1,6 @@
 # Hướng dẫn dựng Jenkins để chạy pipeline DevSecOps
 
-Tài liệu này hướng dẫn dựng một Jenkins chạy bằng Docker trên một máy (Linux, hoặc Windows qua WSL2), rồi chạy [`Jenkinsfile`](../Jenkinsfile) của project: pre-check nhận diện ngôn ngữ → Opengrep, OSV-Scanner, Trivy song song → DAST (tuỳ chọn) → correlate + AI triage → import DefectDojo (tuỳ chọn) → security gate → publish SARIF.
+Tài liệu này hướng dẫn dựng một Jenkins chạy bằng Docker trên một máy (Linux, hoặc Windows qua WSL2), rồi chạy [`Jenkinsfile`](../Jenkinsfile) của project: pre-check nhận diện ngôn ngữ → Opengrep, OSV-Scanner, Trivy song song → DAST (tuỳ chọn) → correlate → import DefectDojo → AI triage → thống kê rule (tuỳ chọn) → security gate → publish SARIF.
 
 Đây là cấu hình **lab / một máy**: Jenkins controller tự chạy các stage và dùng Docker daemon của máy. Khi đưa vào production, xem [Đưa lên production](#9-đưa-lên-production) và [deployment guide §5](DEPLOYMENT-GUIDE.md#5-topology-b-jenkins-with-docker-agents).
 
@@ -189,9 +189,11 @@ Muốn scan repo ứng dụng khác: copy `Jenkinsfile` vào repo đó (hoặc t
 | Pre-check: detect languages | `devsecops-scan detect`: in bảng ngôn ngữ ra console, lưu `security-reports/languages-<prefix>.json`, đặt `SCAN_LANGUAGES` | |
 | Scans (song song) | Opengrep (`--languages "$SCAN_LANGUAGES"`), OSV-Scanner, Trivy fs; Trivy image nếu có `IMAGE_REF` | Mỗi scanner chạy với `--no-fail` để tất cả đều chạy xong |
 | DAST: Katana + Nuclei | Chỉ chạy khi có `DAST_TARGET_URL` | |
-| AI triage + correlate | `devsecops-scan triage`: gộp finding trùng giữa các tool; nếu có credential Anthropic thì Claude đánh giá từng nhóm. Ghi `triage-<prefix>.json` và `.md` | Chỉ tham khảo, gate không dùng. Lỗi → build UNSTABLE ([§8.4](#84-ai-triage-với-claude)) |
-| DefectDojo import | Reimport từng tool lên DefectDojo, gắn verdict AI và correlation thành tag | Chỉ chạy khi đã cấu hình DefectDojo. Lỗi → build UNSTABLE ([§8.5](#85-đẩy-finding-lên-defectdojo)) |
-| Security gate | Ghi `summary-<prefix>.md`, rồi `devsecops-scan gate` quyết định PASS/FAIL | Exit 1 = vi phạm policy, 2 = lỗi scanner/thiếu kết quả → build FAILURE. Chỉ đọc kết quả scan gốc |
+| Correlate | `devsecops-scan correlate`: gộp finding trùng giữa các rule và tool. Ghi `triage-<prefix>.json` và `.md` | Luôn chạy, không gọi AI |
+| DefectDojo import | Reimport từng tool lên DefectDojo, gắn tag correlation, ghi `defectdojo-<prefix>.json` | Chỉ chạy khi đã cấu hình DefectDojo ([§8.4](#84-đẩy-finding-lên-defectdojo)) |
+| AI triage | Claude đánh giá các finding **chưa ai quyết định** trên DefectDojo, ghi tag `ai-*` và note | Chỉ chạy khi có credential Anthropic ([§8.5](#85-ai-triage-với-claude)) |
+| Rule stats | Thống kê FP/trùng theo rule từ DefectDojo, ghi `rule-stats-<prefix>.md` | Chỉ chạy khi bật tham số `RULE_STATS` ([§8.6](#86-thống-kê-rule-để-tuning)) |
+| Security gate | Ghi `summary-<prefix>.md`, rồi `devsecops-scan gate` quyết định PASS/FAIL | Exit 1 = vi phạm policy, 2 = lỗi scanner/thiếu kết quả → build FAILURE. Chỉ đọc kết quả scan gốc. Lỗi ở 4 stage phía trên chỉ làm build UNSTABLE |
 | post | Archive `security-reports/**`, publish SARIF bằng Warnings NG, copy kết quả cho MCP nếu có `MCP_REPORTS_DIR` | Luôn chạy, kể cả khi gate fail |
 
 Build đầu tiên lâu hơn vì Trivy phải tải vulnerability DB (vài trăm MB). Cache nằm trong `<workspace>@tmp/trivy-cache` và được giữ cho các build sau trên cùng máy.
@@ -200,7 +202,7 @@ Build đầu tiên lâu hơn vì Trivy phải tải vulnerability DB (vài trăm
 
 - **Console Output**: mỗi dòng log của scanner có tiền tố tên tool (`[opengrep]`, `[trivy]`, `[osv-scanner]`, ...), kèm câu lệnh chạy và exit code. Stage pre-check in bảng ngôn ngữ tìm thấy. Stage gate in `Policy: PASS/FAIL` cùng lý do.
 - **DevSecOps scans** (link bên trái trang build, do Warnings NG tạo): danh sách finding, lọc theo mức độ, file, rule. Finding SAST mang rule ID dạng `sast-<ngôn ngữ>-<NNNN>`.
-- **Build Artifacts**: `security-reports/<scan_id>/result.json`, `result.sarif`, `policy.json`, `languages-<prefix>.json`, báo cáo tổng hợp `summary-<prefix>.md`, và `triage-<prefix>.md` (bảng finding đã gộp + verdict AI, sắp theo priority) cùng `triage-<prefix>.json`.
+- **Build Artifacts**: `security-reports/<scan_id>/result.json`, `result.sarif`, `policy.json`, `languages-<prefix>.json`, báo cáo tổng hợp `summary-<prefix>.md`, `triage-<prefix>.md`/`.json` (các nhóm finding đã gộp), `triage-ai-<prefix>.md`/`.json` (verdict AI, sắp theo priority), `defectdojo-<prefix>.json` (các test đã import), và `rule-stats-<prefix>.md` nếu bật `RULE_STATS`.
 
 Trạng thái build:
 
@@ -209,7 +211,7 @@ Trạng thái build:
 | SUCCESS | Gate PASS (hoặc WARN khi `enforcement_level: permissive`) |
 | FAILURE ở stage *Security gate* | Có finding vượt ngưỡng trong `security-rules.yml`. Xem summary/Warnings NG |
 | FAILURE ở một stage scan | Scanner lỗi (exit 2). Xem log `[tool]` của stage đó |
-| UNSTABLE | Stage AI triage hoặc DefectDojo lỗi (API key sai, mạng, DefectDojo từ chối). Kết quả scan và gate vẫn hợp lệ. Xem log của stage đó |
+| UNSTABLE | Một trong các stage Correlate, DefectDojo, AI triage, Rule stats bị lỗi (API key sai, mạng, DefectDojo từ chối). Kết quả scan và gate vẫn hợp lệ. Xem log của stage đó |
 
 ## 8. Tuỳ chọn: DAST, scan image, MCP, AI triage, DefectDojo
 
@@ -254,36 +256,9 @@ Với môi trường thật, trỏ `DAST_TARGET_URL` tới staging và giới h�
 
 Sau mỗi build, bước `post` copy các thư mục scan của build đó sang `MCP_REPORTS_DIR`: copy vào tên tạm rồi đổi tên, không ghi đè. MCP tool `list_scans` sẽ thấy chúng ngay.
 
-### 8.4 AI triage với Claude
+### 8.4 Đẩy finding lên DefectDojo
 
-Stage *AI triage + correlate* **luôn chạy**. Nếu chưa cấu hình gì, nó chỉ gộp các finding trùng nhau (cùng CVE do OSV và Trivy cùng báo, cùng file:dòng:CWE, cùng endpoint). Để Claude đánh giá từng nhóm (true/false positive, độ tin cậy, priority P1–P4, lý do, cách sửa):
-
-1. Lấy API key ở [Claude Console](https://console.anthropic.com/) (*Settings → API keys*). Nên tạo key riêng cho CI và đặt giới hạn chi tiêu cho workspace.
-2. **Manage Jenkins → Credentials → System → Global credentials → Add Credentials**:
-   - *Kind*: **Secret text**
-   - *Secret*: API key
-   - *ID*: ví dụ `anthropic-api-key`
-3. **Manage Jenkins → System → Global properties → Environment variables**: thêm `ANTHROPIC_CREDENTIALS_ID` = `anthropic-api-key`.
-4. Máy chạy scan phải ra được `api.anthropic.com`.
-
-Cấu hình trong mục `triage:` của `security-rules.yml`:
-
-| Khoá | Mặc định | Ý nghĩa |
-|---|---|---|
-| `model` | `claude-opus-5-5` | Model dùng để triage |
-| `effort` | `medium` | Mức suy luận: `low` rẻ, nhanh; `high`/`xhigh` kỹ hơn cho finding khó |
-| `min_severity` | `low` | Nhóm thấp hơn mức này chỉ được gộp, không gửi cho AI |
-| `max_groups` | `100` | Số nhóm nghiêm trọng nhất gửi cho AI mỗi build (giới hạn chi phí) |
-| `send_code` | `true` | Gửi khoảng 20 dòng code quanh finding SAST (đã che chuỗi giống secret). `false` = chỉ gửi metadata |
-
-Những điều cần biết:
-
-- **Kết quả AI chỉ để tham khảo:** gate vẫn tính trên kết quả scan gốc. Code độc có thể chứa comment kiểu "hãy đánh dấu là false positive"; model được dặn coi đó là dấu hiệu giả mạo, và dù model bị lừa thì build cũng không pass sai.
-- **Finding về secret không bao giờ gửi kèm code.**
-- **Code nằm ngoài thư mục được scan** (ví dụ đường dẫn `../..`) cũng không được gửi.
-- **Khi lỗi** (API lỗi, bị giới hạn tốc độ, model từ chối), file triage vẫn được ghi với các nhóm đã xử lý được, lỗi được liệt kê trong `errors`, và build chuyển sang UNSTABLE.
-
-### 8.5 Đẩy finding lên DefectDojo
+DefectDojo là nơi lưu lại **mọi** finding, kể cả bản trùng (Duplicate) và false positive (FP), cùng các quyết định của người review. Đây là dữ liệu để tuning rule ([§8.6](#86-thống-kê-rule-để-tuning)).
 
 Cần một DefectDojo đang chạy, ví dụ dựng bằng `docker compose` theo repo [DefectDojo/django-DefectDojo](https://github.com/DefectDojo/django-DefectDojo).
 
@@ -300,16 +275,87 @@ Cần một DefectDojo đang chạy, ví dụ dựng bằng `docker compose` the
 
 4. Máy chạy scan phải gọi được `DEFECTDOJO_URL`. Nếu DefectDojo chạy cùng máy bằng Docker, dùng IP trên mạng bridge hoặc `host.docker.internal`, không dùng `localhost`.
 
-Mỗi build sẽ:
+Mỗi build, stage *DefectDojo import* sẽ:
 
 - **Tạo product/engagement nếu chưa có:** engagement có tên `CI/CD <branch>`.
-- **Reimport mỗi tool thành một test** (`opengrep (sast)`, `osv-scanner (sca)`, `trivy (sca)`, …). DefectDojo tự **đóng finding đã được sửa** và mở lại finding tái xuất hiện, nên lịch sử triage trên DefectDojo được giữ qua các build.
-- **Gắn tag:**
-  - `ai-true-positive` / `ai-false-positive` / `ai-needs-review`, `ai-confidence-*`, `ai-priority-p1`… lấy từ AI triage;
-  - `corr-<id>` cho các finding cùng một vấn đề, và `corr-duplicate` cho các bản trùng (giữ lại bản đầu tiên);
-  - lý do của AI nằm ở trường *Severity Justification*.
-- **Không đổi trạng thái finding theo AI:** không đánh `false_p` và không tắt `active`. Người review quyết định trên DefectDojo, có thể lọc theo tag `ai-false-positive` để xem trước.
+- **Reimport mỗi tool thành một test** (`opengrep (sast)`, `osv-scanner (sca)`, `trivy (sca)`, …). DefectDojo tự **đóng finding đã được sửa** và mở lại finding tái xuất hiện. Quyết định của người review (False Positive, Verified, Risk Accepted…) được giữ qua các build.
+- **Gắn tag correlation** từ stage *Correlate*: `corr-<id>` cho các finding cùng một vấn đề, và `corr-duplicate` cho các bản trùng (giữ lại bản đầu tiên). Mặc định DefectDojo chỉ gộp trùng trong cùng một loại scan, nên trùng giữa OSV và Trivy chỉ thấy được qua tag này.
 - **Bỏ qua tool có scan lỗi trong build đó**, để DefectDojo không đóng nhầm finding của tool ấy.
+- **Ghi lại các test vừa import** vào `defectdojo-<prefix>.json`, để stage *AI triage* biết cần xử lý finding nào.
+
+### 8.5 AI triage với Claude
+
+Stage *AI triage* chạy khi có credential Anthropic:
+
+1. Lấy API key ở [Claude Console](https://console.anthropic.com/) (*Settings → API keys*). Nên tạo key riêng cho CI và đặt giới hạn chi tiêu cho workspace.
+2. **Manage Jenkins → Credentials → System → Global credentials → Add Credentials**:
+   - *Kind*: **Secret text**
+   - *Secret*: API key
+   - *ID*: ví dụ `anthropic-api-key`
+3. **Manage Jenkins → System → Global properties → Environment variables**: thêm `ANTHROPIC_CREDENTIALS_ID` = `anthropic-api-key`.
+4. Máy chạy scan phải ra được `api.anthropic.com`.
+
+**Khi đã cấu hình DefectDojo** (cách nên dùng), stage đọc lại các finding vừa import trên DefectDojo rồi xử lý theo từng nhóm:
+
+| Tình trạng của nhóm | Xử lý |
+|---|---|
+| Không còn finding nào đang mở: đã đóng, hoặc người review đã quyết định (False Positive, Risk Accepted, Verified, Out of scope) | Bỏ qua: AI không đánh giá lại quyết định của người |
+| Mọi finding đang mở đều đã có verdict AI từ build trước | Bỏ qua: mỗi finding chỉ triage một lần, nên từ build thứ hai trở đi gần như không tốn tiền |
+| Còn lại (finding mới, chưa ai xem) | Gửi cho Claude |
+
+Kết quả được ghi về DefectDojo, chỉ trên các finding đang mở và chưa có quyết định:
+- tag `ai-true-positive` / `ai-false-positive` / `ai-needs-review`, `ai-confidence-*`, `ai-priority-p1`…;
+- một **note** chứa lý do, cách sửa và nhóm correlation.
+
+Hệ thống **không bao giờ đổi trạng thái** finding: không đánh `false_p`, không tắt `active`. Người review lọc theo tag (ví dụ `ai-false-positive`) để xem trước rồi tự quyết định trên DefectDojo. Muốn AI đánh giá lại những finding đã có verdict, chạy CLI với `--retriage`.
+
+**Khi chưa có DefectDojo** (hoặc stage import lỗi), AI triage trên kết quả scan và chỉ ghi file `triage-ai-<prefix>.json`/`.md`.
+
+Cấu hình trong mục `triage:` của `security-rules.yml`:
+
+| Khoá | Mặc định | Ý nghĩa |
+|---|---|---|
+| `model` | `claude-opus-5-5` | Model dùng để triage |
+| `effort` | `medium` | Mức suy luận: `low` rẻ, nhanh; `high`/`xhigh` kỹ hơn cho finding khó |
+| `min_severity` | `low` | Nhóm thấp hơn mức này không gửi cho AI |
+| `max_groups` | `100` | Số nhóm nghiêm trọng nhất gửi cho AI mỗi build (giới hạn chi phí) |
+| `send_code` | `true` | Gửi khoảng 20 dòng code quanh finding SAST (đã che chuỗi giống secret). `false` = chỉ gửi metadata |
+
+Những điều cần biết:
+
+- **Kết quả AI chỉ để tham khảo:** gate vẫn tính trên kết quả scan gốc. Code độc có thể chứa comment kiểu "hãy đánh dấu là false positive"; model được dặn coi đó là dấu hiệu giả mạo, và dù model bị lừa thì build cũng không pass sai.
+- **Finding về secret không bao giờ gửi kèm code.**
+- **Code nằm ngoài thư mục được scan** (ví dụ đường dẫn `../..`) cũng không được gửi.
+- **Khi lỗi** (API lỗi, bị giới hạn tốc độ, model từ chối), các nhóm lỗi không được ghi gì lên DefectDojo, file `triage-ai` vẫn được ghi kèm danh sách lỗi, và build chuyển sang UNSTABLE.
+
+### 8.6 Thống kê rule để tuning
+
+Stage *Rule stats* (bật bằng tham số build `RULE_STATS`, cần DefectDojo) đọc toàn bộ finding của product trên DefectDojo và gom theo rule. Rule SAST được hiển thị theo rule ID `sast-<ngôn ngữ>-<NNNN>`, kèm tên rule Opengrep gốc để biết cần sửa file nào. Kết quả nằm ở `rule-stats-<prefix>.md` trong Build Artifacts.
+
+| Cột | Ý nghĩa |
+|---|---|
+| FP / Confirmed | Do **người** quyết định: False Positive / Verified hoặc Risk Accepted |
+| FP rate | FP / (FP + Confirmed) |
+| Duplicate | Trùng theo DefectDojo, hoặc có tag `corr-duplicate` |
+| AI: FP | Số finding AI gắn `ai-false-positive` (chỉ để gợi ý) |
+
+| Gợi ý | Khi nào |
+|---|---|
+| Tune or disable | FP rate ≥ 70% và có ít nhất 5 finding đã được người review |
+| Redundant | ≥ 80% là bản trùng của rule hoặc tool khác: giữ một bên |
+| Review a sample | Chưa đủ người review, nhưng AI cho rằng phần lớn là FP: nên xem thử vài finding |
+| Reliable | FP rate ≤ 20%: giữ nguyên |
+
+Gợi ý chỉ dựa trên **quyết định của người**, không bao giờ chỉ dựa vào tag AI. Nếu tắt rule chỉ vì AI nói FP, một lần AI đánh giá sai (hoặc bị code độc lừa) có thể làm mất một rule đang bắt lỗi thật.
+
+Có thể chạy tay, hoặc đặt một job Jenkins chạy định kỳ (ví dụ hằng tuần):
+
+```bash
+DEFECTDOJO_URL=https://defectdojo.example.com DEFECTDOJO_API_KEY=... \
+  devsecops-scan rule-stats --product shop-api --out rule-stats.md      # --format json, --min-reviewed 10
+```
+
+Sau khi tuning (sửa `exclude`, viết rule riêng thay thế, hoặc bỏ rule khỏi `language_configs` trong `security-rules.yml`), các build sau sẽ không báo lại những finding đó nữa. DefectDojo tự đóng chúng khi reimport.
 
 ## 9. Đưa lên production
 
@@ -341,9 +387,10 @@ Chi tiết: [deployment guide §5–§7](DEPLOYMENT-GUIDE.md#5-topology-b-jenkin
 | Tham số build không xuất hiện | Bình thường ở build đầu: Jenkins đăng ký tham số sau lần chạy đầu tiên của Jenkinsfile |
 | Build FAILURE ở *Security gate* với repo demo | Đúng như mong đợi: `test-samples/` cố ý chứa lỗ hổng |
 | `No such DSL method 'withCredentials'` / `string` | Thiếu plugin Credentials Binding |
-| `ANTHROPIC_API_KEY ... is required` | Biến `ANTHROPIC_CREDENTIALS_ID` có giá trị nhưng credential rỗng, hoặc chạy CLI tay mà không có key. Dùng `--no-ai` nếu chỉ cần correlate |
+| `ANTHROPIC_API_KEY ... is required` | Biến `ANTHROPIC_CREDENTIALS_ID` có giá trị nhưng credential rỗng, hoặc chạy CLI tay mà không có key. Nếu chỉ cần gộp finding, dùng lệnh `correlate` |
+| AI triage không gửi gì cho Claude (`skipped ... decided by people and ... already triaged`) | Bình thường từ build thứ hai: mọi finding đang mở đã có verdict AI hoặc đã được người quyết định. Chạy CLI với `--retriage` nếu muốn đánh giá lại |
 | `Triage error: batch N: ...401...` | API key Anthropic sai hoặc đã bị thu hồi |
 | `Triage error: batch N: model declined the batch (...)` | Model từ chối nội dung của batch (kể cả sau fallback). Các nhóm đó được ghi là `failed`, chỉ ảnh hưởng tới phần tham khảo |
 | `DefectDojo POST /api/v2/reimport-scan/ failed: HTTP 400 ...` | Đọc thông báo đi kèm. Thường gặp: product type không tồn tại và user không có quyền tạo, hoặc thiếu quyền trên product |
 | `DefectDojo ... HTTP 401/403` | API v2 key sai, hoặc user không có quyền trên product/engagement |
-| `fetch failed` / timeout khi gọi DefectDojo | Container scanner không ra được `DEFECTDOJO_URL` (xem bước 4 của [§8.5](#85-đẩy-finding-lên-defectdojo)) |
+| `fetch failed` / timeout khi gọi DefectDojo | Container scanner không ra được `DEFECTDOJO_URL` (xem bước 4 của [§8.4](#84-đẩy-finding-lên-defectdojo)) |

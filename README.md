@@ -8,7 +8,7 @@ Self-hosted security scanning for CI pipelines, with a read-only MCP server for 
   - **Container images:** Trivy
   - **DAST:** Nuclei, with Katana crawling for the fuzzing pass
 - **Every result is stored as JSON and SARIF** under `security-reports/<scan_id>/`. A **real security gate** (thresholds in `security-rules.yml`) sets the CLI exit code that passes or fails the build.
-- **Correlation, AI triage and DefectDojo (optional, advisory):** findings that several tools report for the same issue are grouped. Claude then gives each group a verdict (true/false positive, priority, fix), and every scan is reimported into DefectDojo with the verdicts as tags. The gate never uses AI output.
+- **Correlation, DefectDojo, AI triage and rule statistics (optional, advisory):** findings that several tools report for the same issue are grouped. Every scan is reimported into DefectDojo, which keeps duplicates and false positives. Claude then triages only the findings nobody has decided yet, and per-rule false-positive statistics show which rules to tune. The gate never uses AI output.
 - **The MCP server is optional and only reads results.** It lists and summarizes them for an LLM client, evaluates the policy and renders reports. It cannot start scans or fetch URLs. It runs over authenticated HTTP or stdio.
 - **Everything is self-hosted** and needs no long-running scanner services: Docker Compose for a workstation, Kustomize manifests for Kubernetes.
 
@@ -102,8 +102,10 @@ devsecops-scan detect --target <dir> [--format list|json] [--out file]
 devsecops-scan <sast|sca|container|dast> --target <path|image|url> [options]
 devsecops-scan gate   --scan-id <id> [--scan-id <id> ...]
 devsecops-scan report --scan-id <id> [...] [--format markdown|json|sarif] [--out file]
-devsecops-scan triage --scan-id <id> [...] [--out triage.json] [--md triage.md] [--no-ai]
-devsecops-scan defectdojo --scan-id <id> [...] --product <name> --engagement <name> [--triage triage.json]
+devsecops-scan correlate  --scan-id <id> [...] [--out triage.json] [--md triage.md]
+devsecops-scan defectdojo --scan-id <id> [...] --product <name> --engagement <name> [--triage triage.json] [--imports-out file]
+devsecops-scan triage     --scan-id <id> [...] [--defectdojo imports.json] [--retriage] [--out file] [--md file]
+devsecops-scan rule-stats --product <name> [--format markdown|json] [--out file] [--min-reviewed n]
 ```
 
 | Option | Meaning |
@@ -208,9 +210,17 @@ The gate fails when any of the following is true:
 
 ## Correlation, AI triage and DefectDojo
 
-These steps run after the scans and before the gate. They are **advisory**: the gate always evaluates the raw scan results, so a wrong verdict, or one manipulated by text planted in the scanned code, can never pass a build. In Jenkins, a failure in either step marks the build UNSTABLE instead of failing it.
+After the scans and before the gate, four steps run in this order:
 
-**Correlation** (`devsecops-scan triage`, always on) groups findings that describe the same issue:
+```
+correlate  ->  defectdojo (import)  ->  triage (AI, in DefectDojo)  ->  rule-stats
+```
+
+DefectDojo is the source of truth. It keeps every finding, duplicates and false positives included, together with the decisions people make there. The AI triages only what nobody has decided yet, and `rule-stats` turns the decisions into per-rule numbers for tuning. All four steps are **advisory**: the gate always evaluates the raw scan results, so a wrong verdict, or one manipulated by text planted in the scanned code, can never pass a build. In Jenkins, a failure in any of them marks the build UNSTABLE instead of failing it.
+
+### 1. Correlate
+
+`devsecops-scan correlate` (always on, no AI, no network) groups findings that describe the same issue:
 
 | Kind | Same issue when |
 |---|---|
@@ -218,9 +228,38 @@ These steps run after the scans and before the gate. They are **advisory**: the 
 | code | same file and line with the same CWEs (several Opengrep rules, or Opengrep and a Trivy secret) |
 | endpoint | same method, URL path and parameter, with the same CWEs or Nuclei template |
 
-Group ids (`corr-<12 hex>`) depend only on that key, so they stay the same across builds.
+Group ids (`corr-<12 hex>`) depend only on that key, so they stay the same across builds. By default, DefectDojo deduplicates within one scan type only (and its hash includes the description, which differs between tools), so these groups are the cross-tool duplicate signal. Output: `triage.json` and `triage.md`.
 
-**AI triage** (when `ANTHROPIC_API_KEY` is set; skip it with `--no-ai`) sends each group to Claude (`triage.model`, default `claude-opus-5-5`). For every group it returns a verdict (`true_positive`, `false_positive` or `needs_review`), a confidence, a priority from `P1` to `P4`, a short rationale and a fix.
+### 2. DefectDojo import
+
+`devsecops-scan defectdojo` (needs `DEFECTDOJO_URL` and `DEFECTDOJO_API_KEY`) reimports each completed scan through API v2 `reimport-scan`, as *Generic Findings Import*:
+
+- **Layout:** one test per tool (`opengrep (sast)`, `trivy (sca)`, …), in a product per repository and an engagement per branch. Missing products and engagements are created (`auto_create_context`).
+- **Lifecycle:** findings a tool no longer reports are closed (`close_old_findings`), and fixed findings that come back are reopened. Decisions people made (false positive, risk accepted, verified) stay on the findings across builds.
+- **Matching across builds:** DefectDojo matches findings across reimports by a hash of title, CWE, line, file path and description. These fields therefore carry scanner data only.
+- **Correlation tags:** `corr-<id>` on every member of a group, and `corr-duplicate` on all but the first. Reimport does not rewrite findings it matches, so after each import the CLI resets the `corr-*` tags of the test's findings. It leaves `ai-*` tags and tags added by people alone.
+- **Failed scans** are skipped, so a scanner outage never closes that tool's findings.
+- **Imports record:** `--imports-out` writes the test ids, which the AI triage step reads.
+
+### 3. AI triage in DefectDojo
+
+`devsecops-scan triage --defectdojo <imports.json>` (needs `ANTHROPIC_API_KEY` and the DefectDojo settings) reads the findings of the imported tests back from DefectDojo, then for each correlated group:
+
+| Group state | What happens |
+|---|---|
+| No open finding left: every one is closed, or decided by a person (false positive, risk accepted, verified, out of scope) | Skipped (`human_decided`) |
+| Every open finding already carries an AI verdict from an earlier build | Skipped (`previously_triaged`). `--retriage` triages them again |
+| Otherwise | Sent to Claude (`triage.model`, default `claude-opus-5-5`) |
+
+For each triaged group, Claude returns a verdict (`true_positive`, `false_positive` or `needs_review`), a confidence, a priority from `P1` to `P4`, a short rationale and a fix.
+
+- **Write-back:** the verdict is written to the group's open, undecided findings as tags (`ai-true-positive`, `ai-confidence-high`, `ai-priority-p1`, …), plus one note with the rationale, the fix and the correlated group.
+- **No status changes:** `false_p`, `active` and the other status fields are never changed. A person decides.
+- **Cost:** each finding is triaged once instead of on every build, so after the first builds only new findings cost model calls.
+
+Without DefectDojo, `devsecops-scan triage` triages the scan results directly and only writes `triage-ai.json`/`.md` (in Jenkins, this is the fallback when DefectDojo is not configured or its import failed).
+
+In both modes:
 
 - **What is sent:** rule, message, CWE/CVE, location and package. With `triage.send_code: true` it also sends about 20 lines of source around SAST findings, after removing likely credentials (private keys, `password=`-style assignments, AWS/GitHub/Slack/API tokens, JWTs, long opaque strings). This redaction is best effort.
 - **Secret findings never send code.**
@@ -228,22 +267,36 @@ Group ids (`corr-<12 hex>`) depend only on that key, so they stay the same acros
 - **Refusals:** requests use the server-side refusal fallback (`fallbacks: "default"`), because security content can trip safety classifiers.
 - **Limits:** `triage.max_groups` (most severe first) and `triage.min_severity` cap the cost. Groups beyond them are listed as not triaged.
 
-Outputs: `triage.json` (every group, its findings, status and verdict) and `triage.md`, a table sorted by priority.
+### 4. Rule statistics
 
-**DefectDojo** (`devsecops-scan defectdojo`, needs `DEFECTDOJO_URL` and `DEFECTDOJO_API_KEY`) reimports each completed scan through API v2 `reimport-scan`, as *Generic Findings Import*:
+`devsecops-scan rule-stats --product <name>` reads all findings of a product from DefectDojo and aggregates them per rule (`vuln_id_from_tool`: the project rule ID for SAST, the CVE/GHSA for dependencies, the template for Nuclei). For SAST rules it also shows the Opengrep rule behind the ID, from the rule ID catalog.
 
-- **Layout:** one test per tool (`opengrep (sast)`, `trivy (sca)`, …), in a product per repository and an engagement per branch. Missing products and engagements are created (`auto_create_context`).
-- **Lifecycle:** findings a tool no longer reports are closed (`close_old_findings`), and fixed findings that come back are reopened.
-- **Matching across builds:** DefectDojo matches findings across reimports by a hash of title, CWE, line, file path and description. These fields therefore carry scanner data only.
-- **Where AI output goes:** verdicts go into tags (`ai-true-positive`, `ai-confidence-high`, `ai-priority-p1`, …) and `severity_justification`. Correlation goes into tags too: `corr-<id>` on every member of a group, and `corr-duplicate` on all but the first.
-- **Existing findings:** reimport does not rewrite findings it matches. So after each import, the CLI resets the `ai-*`/`corr-*` tags of the test's findings and leaves other tags alone.
-- **Failed scans** are skipped, so a scanner outage never closes that tool's findings.
+| Column | Meaning |
+|---|---|
+| FP / Confirmed | Decisions by people: false positive / verified or risk accepted |
+| FP rate | FP / (FP + Confirmed) |
+| Duplicate | DefectDojo duplicates plus `corr-duplicate` |
+| AI: FP | Findings the AI tagged `ai-false-positive` (a hint) |
+
+Each rule gets a suggestion, ordered by priority:
+
+| Suggestion | When |
+|---|---|
+| tune or disable | FP rate ≥ 70% with at least `--min-reviewed` (default 5) reviewed findings |
+| redundant | ≥ 80% duplicates |
+| review a sample | Few reviews yet, but the AI flags at least half as false positives |
+| reliable | FP rate ≤ 20% |
+
+Suggestions are based on decisions by people. A rule is never called noisy from AI tags alone.
 
 ```bash
-devsecops-scan triage $IDS --out security-reports/triage.json --md security-reports/triage.md
-DEFECTDOJO_URL=https://defectdojo.example.com DEFECTDOJO_API_KEY=... \
-  devsecops-scan defectdojo $IDS --triage security-reports/triage.json \
+export DEFECTDOJO_URL=https://defectdojo.example.com DEFECTDOJO_API_KEY=...
+devsecops-scan correlate  $IDS --out security-reports/triage.json --md security-reports/triage.md
+devsecops-scan defectdojo $IDS --triage security-reports/triage.json --imports-out security-reports/defectdojo.json \
   --product shop-api --engagement "CI/CD main" --branch main --commit "$GIT_COMMIT"
+ANTHROPIC_API_KEY=... devsecops-scan triage $IDS --defectdojo security-reports/defectdojo.json \
+  --out security-reports/triage-ai.json --md security-reports/triage-ai.md
+devsecops-scan rule-stats --product shop-api --out security-reports/rule-stats.md
 ```
 
 ## Jenkins
@@ -254,7 +307,7 @@ DEFECTDOJO_URL=https://defectdojo.example.com DEFECTDOJO_API_KEY=... \
 2. Install the plugins Docker Pipeline, Timestamper, Warnings Next Generation and Credentials Binding.
 3. Create a Pipeline job from SCM and set the parameters (`SCANNER_IMAGE`, `IMAGE_REF`, `DAST_TARGET_URL`, `DAST_MODE`).
 
-A pre-check stage runs `devsecops-scan detect` on the checkout and passes the languages it finds to the SAST stage (`--languages`), so Opengrep only loads the rule sets for those languages plus the common rules. The detection is archived as `security-reports/languages-<prefix>.json`. The pipeline then runs Opengrep, OSV-Scanner and Trivy in parallel, plus the Trivy image scan when `IMAGE_REF` is set. DAST runs when `DAST_TARGET_URL` is set. It needs no credentials and no shared daemon. Next, the **AI triage + correlate** stage writes `triage-<prefix>.json`/`.md`. It calls Claude only when the Jenkins environment variable `ANTHROPIC_CREDENTIALS_ID` names a *Secret text* credential; otherwise it only correlates. The **DefectDojo import** stage runs when `DEFECTDOJO_URL` and `DEFECTDOJO_CREDENTIALS_ID` are set. `DEFECTDOJO_PRODUCT` and `DEFECTDOJO_PRODUCT_TYPE` are optional: the product defaults to the repository or job name, and the engagement is `CI/CD <branch>`. Both stages mark the build UNSTABLE on failure. Finally, the stage `devsecops-scan gate` fails the build on exit code 1 or 2. Reports are archived and the SARIF files are published with Warnings NG.
+A pre-check stage runs `devsecops-scan detect` on the checkout and passes the languages it finds to the SAST stage (`--languages`), so Opengrep only loads the rule sets for those languages plus the common rules. The detection is archived as `security-reports/languages-<prefix>.json`. The pipeline then runs Opengrep, OSV-Scanner and Trivy in parallel, plus the Trivy image scan when `IMAGE_REF` is set. DAST runs when `DAST_TARGET_URL` is set. It needs no credentials and no shared daemon. Next come **Correlate** (always), **DefectDojo import** (when `DEFECTDOJO_URL` and `DEFECTDOJO_CREDENTIALS_ID` are set; the product defaults to the repository or job name, the engagement is `CI/CD <branch>`), **AI triage** (when `ANTHROPIC_CREDENTIALS_ID` names a *Secret text* credential; in DefectDojo when it is configured, otherwise on the scan results) and **Rule stats** (build parameter `RULE_STATS`). They mark the build UNSTABLE on failure. Finally, the stage `devsecops-scan gate` fails the build on exit code 1 or 2. Reports are archived and the SARIF files are published with Warnings NG.
 
 **Results for the MCP server:** set `MCP_REPORTS_DIR` (a Jenkins global or node environment variable) to a directory that is mounted on the agent and that the MCP server also mounts. After each build, the `post` step copies that build's scan directories there. It copies to a temporary name and then renames, so the MCP server never sees a partial result, and it never overwrites. Without the variable, results are only archived in Jenkins. See [deployment guide §5.4](docs/DEPLOYMENT-GUIDE.md#54-deliver-results-to-the-mcp-server).
 

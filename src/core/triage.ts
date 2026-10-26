@@ -36,7 +36,18 @@ export interface TriageInput {
 /** Triage one batch of groups. Implemented by the Claude client below, and by fakes in tests. */
 export type TriageModel = (batch: TriageInput[]) => Promise<TriageVerdict[]>;
 
-export type TriageStatus = 'triaged' | 'failed' | 'below_threshold' | 'over_limit' | 'ai_disabled';
+export type TriageStatus =
+  | 'triaged'
+  | 'failed'
+  | 'below_threshold'
+  | 'over_limit'
+  | 'ai_disabled'
+  // DefectDojo mode: a person already decided every open finding of the group (or none is open),
+  | 'human_decided'
+  // an earlier build's AI verdict is on every open finding,
+  | 'previously_triaged'
+  // or the group's findings were not imported.
+  | 'not_in_defectdojo';
 
 export interface TriagedGroup {
   id: string;
@@ -165,6 +176,8 @@ export interface TriageOptions {
   config: SecurityRules['triage'];
   scanIds: string[];
   now?: Date;
+  /** Groups decided elsewhere (DefectDojo): never sent to the model, reported with this status. */
+  skip?: Map<string, TriageStatus>;
 }
 
 /**
@@ -178,8 +191,9 @@ export async function runTriage(groups: CorrelatedGroup[], options: TriageOption
   const verdicts = new Map<string, TriageVerdict>();
   const errors: string[] = [];
 
-  const eligible = groups.filter((group) => severityRank(group.severity) >= minRank);
-  for (const group of groups) statuses.set(group.id, options.model ? 'below_threshold' : 'ai_disabled');
+  const skip = options.skip ?? new Map<string, TriageStatus>();
+  const eligible = groups.filter((group) => !skip.has(group.id) && severityRank(group.severity) >= minRank);
+  for (const group of groups) statuses.set(group.id, skip.get(group.id) ?? (options.model ? 'below_threshold' : 'ai_disabled'));
 
   if (options.model) {
     const selected = eligible.slice(0, config.max_groups);

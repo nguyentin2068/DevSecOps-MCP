@@ -41,7 +41,50 @@ const SEVERITY: Record<Severity, GenericFinding['severity']> = {
 };
 
 /** Tags this integration owns on a finding; everything else (added by people) is preserved. */
-export const MANAGED_TAG = /^(ai-|corr-)/;
+export const AI_TAG = /^ai-/;
+export const CORRELATION_TAG = /^corr-/;
+const AI_VERDICT_TAG = /^ai-(true-positive|false-positive|needs-review)$/;
+
+/** The fields of a DefectDojo finding this integration reads. */
+export interface DojoFinding {
+  id: number;
+  test: number;
+  title?: string;
+  severity?: string;
+  unique_id_from_tool?: string | null;
+  vuln_id_from_tool?: string | null;
+  tags?: string[];
+  active?: boolean;
+  verified?: boolean;
+  false_p?: boolean;
+  risk_accepted?: boolean;
+  out_of_scope?: boolean;
+  duplicate?: boolean;
+  is_mitigated?: boolean;
+}
+
+/** A person (or an earlier workflow) has already decided this finding. */
+export function isDecided(finding: DojoFinding): boolean {
+  return Boolean(finding.false_p || finding.risk_accepted || finding.verified || finding.out_of_scope);
+}
+
+export function hasAiVerdict(finding: DojoFinding): boolean {
+  return (finding.tags ?? []).some((tag) => AI_VERDICT_TAG.test(tag));
+}
+
+/** `current` with the tags matching `managed` replaced by `wanted`; undefined when nothing changes. */
+export function replaceManagedTags(current: string[], managed: RegExp, wanted: string[]): string[] | undefined {
+  const next = [...current.filter((tag) => !managed.test(tag)), ...wanted.filter((tag) => managed.test(tag))];
+  return next.length === current.length && next.every((tag) => current.includes(tag)) ? undefined : next;
+}
+
+/** Record of one build's imports, read by the AI triage stage to find the tests. */
+export interface ImportsRecord {
+  schema_version: 1;
+  product: string;
+  engagement: string;
+  imports: ImportOutcome[];
+}
 
 /** AI and correlation tags for each finding id, from the triage report. */
 export function annotations(report: TriageReport | undefined): Map<string, { tags: string[]; justification?: string }> {
@@ -209,9 +252,10 @@ export class DefectDojoClient {
     return testId;
   }
 
-  async findingsOfTest(testId: number): Promise<Array<{ id: number; unique_id_from_tool?: string | null; tags?: string[] }>> {
-    const out: Array<{ id: number; unique_id_from_tool?: string | null; tags?: string[] }> = [];
-    let next: string | null = `/api/v2/findings/?test=${testId}&limit=200`;
+  /** All findings matching a query string (DefectDojo filter parameters), following pagination. */
+  async listFindings(query: string): Promise<DojoFinding[]> {
+    const out: DojoFinding[] = [];
+    let next: string | null = `/api/v2/findings/?${query}&limit=200`;
     const seen = new Set<string>();
     while (next) {
       // A server that repeats a link, or never ends, must not loop the build.
@@ -224,6 +268,23 @@ export class DefectDojoClient {
     return out;
   }
 
+  /**
+   * Findings of one test. `test` is a filter DefectDojo generates from the model rather than
+   * declares, so results are checked again here: a server that ignored the filter would
+   * otherwise return every finding it has, and the tag sync would edit all of them.
+   */
+  async findingsOfTest(testId: number): Promise<DojoFinding[]> {
+    return (await this.listFindings(`test=${testId}`)).filter((finding) => finding.test === testId);
+  }
+
+  async addNote(findingId: number, entry: string): Promise<void> {
+    await this.request(`/api/v2/findings/${findingId}/notes/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry, private: false })
+    });
+  }
+
   async setTags(findingId: number, tags: string[]): Promise<void> {
     await this.request(`/api/v2/findings/${findingId}/`, {
       method: 'PATCH',
@@ -234,9 +295,12 @@ export class DefectDojoClient {
 }
 
 /**
- * Reimport every completed scan as its own DefectDojo test, then bring the AI and correlation
- * tags of findings that already existed up to date (reimport does not rewrite matched findings).
- * Failed scans are skipped: reimporting an empty result would close all of the tool's findings.
+ * Reimport every completed scan as its own DefectDojo test, then bring the correlation tags of
+ * findings that already existed up to date (reimport does not rewrite matched findings). AI
+ * tags are synced too only when the report carries AI verdicts; with a correlation-only report
+ * (the normal pipeline order: correlate, import, then AI triage in DefectDojo) they are left
+ * alone, so verdicts from earlier builds survive. Failed scans are skipped: reimporting an
+ * empty result would close all of the tool's findings.
  */
 export async function importToDefectDojo(
   client: DefectDojoClient,
@@ -257,13 +321,12 @@ export async function importToDefectDojo(
 
     let updated = 0;
     if (report) {
+      const managed = report.model ? /^(ai-|corr-)/ : CORRELATION_TAG;
       for (const existing of await client.findingsOfTest(testId)) {
         const uid = existing.unique_id_from_tool;
         if (!uid) continue;
-        const wanted = notes.get(`${result.scan_id}:${uid}`)?.tags ?? [];
-        const current = existing.tags ?? [];
-        const next = [...current.filter((tag) => !MANAGED_TAG.test(tag)), ...wanted];
-        if (next.length === current.length && next.every((tag) => current.includes(tag))) continue;
+        const next = replaceManagedTags(existing.tags ?? [], managed, notes.get(`${result.scan_id}:${uid}`)?.tags ?? []);
+        if (!next) continue;
         await client.setTags(existing.id, next);
         updated++;
       }

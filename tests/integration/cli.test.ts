@@ -355,6 +355,24 @@ describe('devsecops-scan triage and defectdojo', () => {
     expect(readFileSync(md, 'utf8')).toMatch(/^# Correlation and AI triage/);
   });
 
+  it('correlate is triage without AI, and DefectDojo-mode triage needs AI', async () => {
+    const { io, out: stdout } = capture();
+    expect(await main(['correlate', '--scan-id', 'sca-osv-cli-1', '--scan-id', 'sca-trivy-cli-1'], io, env)).toBe(EXIT.PASS);
+    expect(stdout.join('\n')).toMatch(/AI triage: off/);
+    const bad = capture();
+    expect(await main(['correlate', '--scan-id', 'sca-osv-cli-1', '--defectdojo', 'x.json'], bad.io, env)).toBe(EXIT.ERROR);
+    expect(bad.err.join('\n')).toMatch(/--defectdojo needs AI triage/);
+  });
+
+  it('rule-stats needs a product and DefectDojo settings', async () => {
+    const noProduct = capture();
+    expect(await main(['rule-stats'], noProduct.io, env)).toBe(EXIT.ERROR);
+    expect(noProduct.err.join('\n')).toMatch(/--product is required/);
+    const noDojo = capture();
+    expect(await main(['rule-stats', '--product', 'shop'], noDojo.io, env)).toBe(EXIT.ERROR);
+    expect(noDojo.err.join('\n')).toMatch(/DEFECTDOJO_URL and DEFECTDOJO_API_KEY/);
+  });
+
   it('requires an API key for AI triage, and DefectDojo settings for the import', async () => {
     const { io, err } = capture();
     expect(await main(['triage', '--scan-id', 'sca-osv-cli-1'], io, env)).toBe(EXIT.ERROR);

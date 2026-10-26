@@ -4,12 +4,14 @@
 // Required plugins: Pipeline, Docker Pipeline, Timestamper, Warnings Next Generation (SARIF),
 // Credentials Binding (AI triage and DefectDojo stages).
 //
+// After the scans: Correlate (always) -> DefectDojo import -> AI triage -> Rule stats -> gate.
 // Optional stages, enabled by Jenkins global (or node) environment variables:
-// - AI triage: ANTHROPIC_CREDENTIALS_ID = id of a "Secret text" credential holding an Anthropic
-//   API key. Without it, the stage still correlates findings, without AI.
 // - DefectDojo: DEFECTDOJO_URL and DEFECTDOJO_CREDENTIALS_ID ("Secret text" with an API v2 key).
 //   Optional: DEFECTDOJO_PRODUCT (default: the repository/job name), DEFECTDOJO_PRODUCT_TYPE.
-// Both are advisory: a failure marks the build UNSTABLE, and the gate never uses their output.
+// - AI triage: ANTHROPIC_CREDENTIALS_ID = id of a "Secret text" credential holding an Anthropic
+//   API key. With DefectDojo it triages there; without it, on the scan results.
+// - Rule stats: build parameter RULE_STATS (needs DefectDojo).
+// All of them are advisory: a failure marks the build UNSTABLE, and the gate never uses them.
 // Setup walkthrough: docs/DEPLOYMENT-GUIDE.md (single-machine lab: docs/JENKINS-SETUP.md).
 // On Kubernetes, replace the docker agent with the pod template in
 // deploy/k8s/jenkins/scanner-pod.yaml (see the comment at the agent block).
@@ -30,6 +32,7 @@ pipeline {
     string(name: 'IMAGE_REF', defaultValue: '', description: 'Container image to scan with Trivy (optional), e.g. registry.example.com/app:1.2.3')
     string(name: 'DAST_TARGET_URL', defaultValue: '', description: 'Staging URL to crawl (katana) and scan (nuclei); optional, must pass the DAST allowlist')
     choice(name: 'DAST_MODE', choices: ['baseline', 'full'], description: 'full adds nuclei fuzzing templates; use only against test environments')
+    booleanParam(name: 'RULE_STATS', defaultValue: false, description: 'Write per-rule false-positive/duplicate statistics from DefectDojo (rule-stats-<prefix>.md)')
   }
 
   options {
@@ -62,6 +65,18 @@ pipeline {
           if (params.IMAGE_REF?.trim()) { ids << "container-trivy-${env.SCAN_PREFIX}" }
           if (params.DAST_TARGET_URL?.trim()) { ids << "dast-nuclei-${env.SCAN_PREFIX}" }
           env.SCAN_ID_ARGS = ids.collect { "--scan-id ${it}" }.join(' ')
+
+          // DefectDojo context, shared by the import, AI triage and rule-stats stages.
+          env.DOJO_ENABLED = (env.DEFECTDOJO_URL?.trim() && env.DEFECTDOJO_CREDENTIALS_ID?.trim()) ? 'true' : 'false'
+          if (env.DOJO_ENABLED == 'true') {
+            // Multibranch jobs are named <folder>/<repo>/<branch>: use the repo; plain jobs: the job name.
+            def parts = env.JOB_NAME.split('/')
+            def branch = env.BRANCH_NAME ?: (env.GIT_BRANCH ?: 'main').replaceFirst('^origin/', '')
+            env.DD_PRODUCT = env.DEFECTDOJO_PRODUCT?.trim() ?: ((env.BRANCH_NAME && parts.length > 1) ? parts[-2] : parts[-1])
+            env.DD_PRODUCT_TYPE = env.DEFECTDOJO_PRODUCT_TYPE?.trim() ?: 'DevSecOps'
+            env.DD_ENGAGEMENT = "CI/CD ${branch}"
+            env.DD_BRANCH = branch
+          }
         }
         sh 'mkdir -p "$HOME" "$REPORTS_DIR" "$TRIVY_CACHE_DIR"'
       }
@@ -123,54 +138,77 @@ pipeline {
       }
     }
 
-    stage('AI triage + correlate') {
-      // Groups findings that describe the same issue across tools (same CVE, same line and CWE,
-      // same endpoint), then asks Claude for an advisory verdict per group when an Anthropic
-      // credential is configured. Output: security-reports/triage-<prefix>.json and .md.
+    stage('Correlate') {
+      // Groups findings that describe the same issue across rules and tools (same CVE, same line
+      // and CWE, same endpoint). No AI, no network. The DefectDojo import turns the groups into
+      // corr-* tags, the cross-tool duplicate signal DefectDojo's own deduplication does not give.
       steps {
         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-          script {
-            if (env.ANTHROPIC_CREDENTIALS_ID?.trim()) {
-              withCredentials([string(credentialsId: env.ANTHROPIC_CREDENTIALS_ID, variable: 'ANTHROPIC_API_KEY')]) {
-                sh 'devsecops-scan triage $SCAN_ID_ARGS --out "$REPORTS_DIR/triage-$SCAN_PREFIX.json" --md "$REPORTS_DIR/triage-$SCAN_PREFIX.md"'
-              }
-            } else {
-              sh 'devsecops-scan triage $SCAN_ID_ARGS --no-ai --out "$REPORTS_DIR/triage-$SCAN_PREFIX.json" --md "$REPORTS_DIR/triage-$SCAN_PREFIX.md"'
-            }
-          }
+          sh 'devsecops-scan correlate $SCAN_ID_ARGS --out "$REPORTS_DIR/triage-$SCAN_PREFIX.json" --md "$REPORTS_DIR/triage-$SCAN_PREFIX.md"'
         }
       }
     }
 
     stage('DefectDojo import') {
       // One DefectDojo test per tool, reimported every build (closes fixed findings), in the
-      // product for this repository and an engagement per branch. AI verdicts and correlation
-      // become tags (ai-*, corr-*). Failed scans are skipped so their findings stay open.
-      when { expression { env.DEFECTDOJO_URL?.trim() && env.DEFECTDOJO_CREDENTIALS_ID?.trim() } }
+      // product for this repository and an engagement per branch. DefectDojo keeps every
+      // finding, duplicates and false positives included, with corr-* tags from Correlate.
+      // Failed scans are skipped so their findings stay open. The imported test ids are recorded
+      // for the AI triage stage.
+      when { expression { env.DOJO_ENABLED == 'true' } }
+      steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+          withCredentials([string(credentialsId: env.DEFECTDOJO_CREDENTIALS_ID, variable: 'DEFECTDOJO_API_KEY')]) {
+            sh '''
+              set -eu
+              triage="$REPORTS_DIR/triage-$SCAN_PREFIX.json"
+              [ -f "$triage" ] && set -- --triage "$triage" || set --
+              devsecops-scan defectdojo $SCAN_ID_ARGS "$@" --imports-out "$REPORTS_DIR/defectdojo-$SCAN_PREFIX.json" \
+                --product "$DD_PRODUCT" --product-type "$DD_PRODUCT_TYPE" --engagement "$DD_ENGAGEMENT" \
+                --branch "$DD_BRANCH" --commit "${GIT_COMMIT:-}" --build-id "$BUILD_NUMBER" ${GIT_URL:+--scm-uri "$GIT_URL"}
+            '''
+          }
+        }
+      }
+    }
+
+    stage('AI triage') {
+      // Advisory verdicts from Claude. With DefectDojo, it works on the findings just imported:
+      // findings people already decided (false positive, verified, risk accepted, out of scope)
+      // or that an earlier build already triaged are skipped, and verdicts go back as ai-* tags
+      // and a note. Without DefectDojo (or if the import failed), it triages the scan results and
+      // only writes triage-ai-<prefix>.json/.md.
+      when { expression { env.ANTHROPIC_CREDENTIALS_ID?.trim() } }
       steps {
         catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
           script {
-            // Multibranch jobs are named <folder>/<repo>/<branch>: use the repo; plain jobs: the job name.
-            def parts = env.JOB_NAME.split('/')
-            def product = env.DEFECTDOJO_PRODUCT?.trim() ?: ((env.BRANCH_NAME && parts.length > 1) ? parts[-2] : parts[-1])
-            def branch = env.BRANCH_NAME ?: (env.GIT_BRANCH ?: 'main').replaceFirst('^origin/', '')
-            withEnv([
-              "DD_PRODUCT=${product}",
-              "DD_PRODUCT_TYPE=${env.DEFECTDOJO_PRODUCT_TYPE?.trim() ?: 'DevSecOps'}",
-              "DD_ENGAGEMENT=CI/CD ${branch}",
-              "DD_BRANCH=${branch}"
-            ]) {
-              withCredentials([string(credentialsId: env.DEFECTDOJO_CREDENTIALS_ID, variable: 'DEFECTDOJO_API_KEY')]) {
-                sh '''
-                  set -eu
-                  triage="$REPORTS_DIR/triage-$SCAN_PREFIX.json"
-                  [ -f "$triage" ] && set -- --triage "$triage" || set --
-                  devsecops-scan defectdojo $SCAN_ID_ARGS "$@" \
-                    --product "$DD_PRODUCT" --product-type "$DD_PRODUCT_TYPE" --engagement "$DD_ENGAGEMENT" \
-                    --branch "$DD_BRANCH" --commit "${GIT_COMMIT:-}" --build-id "$BUILD_NUMBER" ${GIT_URL:+--scm-uri "$GIT_URL"}
-                '''
+            def out = '--out "$REPORTS_DIR/triage-ai-$SCAN_PREFIX.json" --md "$REPORTS_DIR/triage-ai-$SCAN_PREFIX.md"'
+            if (env.DOJO_ENABLED == 'true' && fileExists("security-reports/defectdojo-${env.SCAN_PREFIX}.json")) {
+              withCredentials([
+                string(credentialsId: env.ANTHROPIC_CREDENTIALS_ID, variable: 'ANTHROPIC_API_KEY'),
+                string(credentialsId: env.DEFECTDOJO_CREDENTIALS_ID, variable: 'DEFECTDOJO_API_KEY')
+              ]) {
+                sh "devsecops-scan triage \$SCAN_ID_ARGS --defectdojo \"\$REPORTS_DIR/defectdojo-\$SCAN_PREFIX.json\" ${out}"
+              }
+            } else {
+              withCredentials([string(credentialsId: env.ANTHROPIC_CREDENTIALS_ID, variable: 'ANTHROPIC_API_KEY')]) {
+                sh "devsecops-scan triage \$SCAN_ID_ARGS ${out}"
               }
             }
+          }
+        }
+      }
+    }
+
+    stage('Rule stats') {
+      // Per-rule false-positive and duplicate statistics from DefectDojo, for tuning rules.
+      // Decisions by people count; AI tags are shown as a hint. Opt in per build (RULE_STATS),
+      // or run "devsecops-scan rule-stats" from a scheduled job.
+      when { expression { env.DOJO_ENABLED == 'true' && params.RULE_STATS } }
+      steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+          withCredentials([string(credentialsId: env.DEFECTDOJO_CREDENTIALS_ID, variable: 'DEFECTDOJO_API_KEY')]) {
+            sh 'devsecops-scan rule-stats --product "$DD_PRODUCT" --out "$REPORTS_DIR/rule-stats-$SCAN_PREFIX.md"'
           }
         }
       }
