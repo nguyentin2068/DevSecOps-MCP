@@ -10,7 +10,6 @@ logs
 .env.*
 !.env.example
 test-samples
-test-vulnerable-dependencies
 tests
 deploy
 docs

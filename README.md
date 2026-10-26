@@ -67,9 +67,10 @@ mkdir -p security-reports
 docker compose build scanner          # the scanner image; no .env needed
 ```
 
-Run scans with the scanner image. `SCAN_SOURCE` in `.env` picks the source tree; the default is `./test-samples`, which contains deliberately vulnerable code.
+Run scans with the scanner image. `SCAN_SOURCE` in `.env` picks the source tree; the default is `./test-samples`, which contains deliberately vulnerable code and a `package-lock.json` pinned to vulnerable npm packages.
 
 ```bash
+docker compose run --rm -T scanner devsecops-scan detect --target /workspace/src   # languages found
 docker compose run --rm scanner devsecops-scan sast --target /workspace/src
 docker compose run --rm scanner devsecops-scan sca  --target /workspace/src --tool trivy
 
@@ -77,6 +78,8 @@ docker compose run --rm scanner devsecops-scan sca  --target /workspace/src --to
 docker compose --profile demo up -d dast-target
 docker compose run --rm scanner devsecops-scan dast --target http://dast-target:3001/
 ```
+
+On Windows, run these inside WSL2 (see [deployment guide §4.6](docs/DEPLOYMENT-GUIDE.md#46-windows-workstation-wsl2)).
 
 Results are written to `./security-reports/<scan_id>/` as JSON + SARIF. Render them with `docker compose run --rm scanner devsecops-scan report --scan-id <id> --format markdown`, open the `.sarif` files in an IDE (for example the VS Code SARIF Viewer), or publish them in Jenkins.
 
@@ -301,6 +304,7 @@ npm run build        # tsc -> dist/
 npm run typecheck    # src + tests
 npm run lint         # ESLint 9 + typescript-eslint
 npm test             # Jest: unit + integration (a real MCP client over HTTP, the CLI with stub scanners)
+npm run rules:ids -- --rules-dir <opengrep-rules checkout> --source opengrep-rules@<commit>   # after bumping opengrep-rules
 npm run scan -- sast --target test-samples   # needs opengrep on PATH (or OPENGREP_PATH) and OPENGREP_RULES_DIR
 ```
 

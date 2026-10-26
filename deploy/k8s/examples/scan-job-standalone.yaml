@@ -53,7 +53,7 @@ spec:
               mountPath: /tmp
       containers:
         - name: scanner
-          image: registry.example.com/devsecops-scanner:2.0.0
+          image: registry.example.com/devsecops-scanner:2.1.0
           command: ["sh", "-c"]
           args:
             - |

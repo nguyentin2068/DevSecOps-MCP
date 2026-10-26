@@ -11,14 +11,14 @@
 pipeline {
   agent {
     docker {
-      image(params.SCANNER_IMAGE ?: 'registry.example.com/devsecops-scanner:2.0.0')
+      image(params.SCANNER_IMAGE ?: 'registry.example.com/devsecops-scanner:2.1.0')
     }
     // Kubernetes alternative:
     // kubernetes { yamlFile 'deploy/k8s/jenkins/scanner-pod.yaml'; defaultContainer 'scanner' }
   }
 
   parameters {
-    string(name: 'SCANNER_IMAGE', defaultValue: 'registry.example.com/devsecops-scanner:2.0.0', description: 'Scanner image built with: docker build --target scanner')
+    string(name: 'SCANNER_IMAGE', defaultValue: 'registry.example.com/devsecops-scanner:2.1.0', description: 'Scanner image built with: docker build --target scanner')
     string(name: 'IMAGE_REF', defaultValue: '', description: 'Container image to scan with Trivy (optional), e.g. registry.example.com/app:1.2.3')
     string(name: 'DAST_TARGET_URL', defaultValue: '', description: 'Staging URL to crawl (katana) and scan (nuclei); optional, must pass the DAST allowlist')
     choice(name: 'DAST_MODE', choices: ['baseline', 'full'], description: 'full adds nuclei fuzzing templates; use only against test environments')
