@@ -1,7 +1,15 @@
 // DevSecOps pipeline example: scanners run directly via the devsecops-scan CLI inside the
 // scanner image; results are stored as JSON + SARIF; the build is gated on the CLI exit code.
 //
-// Required plugins: Pipeline, Docker Pipeline, Timestamper, Warnings Next Generation (SARIF).
+// Required plugins: Pipeline, Docker Pipeline, Timestamper, Warnings Next Generation (SARIF),
+// Credentials Binding (AI triage and DefectDojo stages).
+//
+// Optional stages, enabled by Jenkins global (or node) environment variables:
+// - AI triage: ANTHROPIC_CREDENTIALS_ID = id of a "Secret text" credential holding an Anthropic
+//   API key. Without it, the stage still correlates findings, without AI.
+// - DefectDojo: DEFECTDOJO_URL and DEFECTDOJO_CREDENTIALS_ID ("Secret text" with an API v2 key).
+//   Optional: DEFECTDOJO_PRODUCT (default: the repository/job name), DEFECTDOJO_PRODUCT_TYPE.
+// Both are advisory: a failure marks the build UNSTABLE, and the gate never uses their output.
 // Setup walkthrough: docs/DEPLOYMENT-GUIDE.md (single-machine lab: docs/JENKINS-SETUP.md).
 // On Kubernetes, replace the docker agent with the pod template in
 // deploy/k8s/jenkins/scanner-pod.yaml (see the comment at the agent block).
@@ -48,6 +56,12 @@ pipeline {
           // Unique, valid scan id prefix: lowercase [a-z0-9_-] only, short enough for every id.
           def prefix = "${env.JOB_NAME}-${env.BUILD_NUMBER}".toLowerCase().replaceAll('[^a-z0-9_-]', '-')
           env.SCAN_PREFIX = prefix.length() > 90 ? prefix.substring(prefix.length() - 90) : prefix
+
+          // Every scan this build runs, as CLI arguments for the triage, DefectDojo and gate stages.
+          def ids = ["sast-opengrep-${env.SCAN_PREFIX}", "sca-osv-scanner-${env.SCAN_PREFIX}", "sca-trivy-${env.SCAN_PREFIX}"]
+          if (params.IMAGE_REF?.trim()) { ids << "container-trivy-${env.SCAN_PREFIX}" }
+          if (params.DAST_TARGET_URL?.trim()) { ids << "dast-nuclei-${env.SCAN_PREFIX}" }
+          env.SCAN_ID_ARGS = ids.collect { "--scan-id ${it}" }.join(' ')
         }
         sh 'mkdir -p "$HOME" "$REPORTS_DIR" "$TRIVY_CACHE_DIR"'
       }
@@ -109,18 +123,65 @@ pipeline {
       }
     }
 
+    stage('AI triage + correlate') {
+      // Groups findings that describe the same issue across tools (same CVE, same line and CWE,
+      // same endpoint), then asks Claude for an advisory verdict per group when an Anthropic
+      // credential is configured. Output: security-reports/triage-<prefix>.json and .md.
+      steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+          script {
+            if (env.ANTHROPIC_CREDENTIALS_ID?.trim()) {
+              withCredentials([string(credentialsId: env.ANTHROPIC_CREDENTIALS_ID, variable: 'ANTHROPIC_API_KEY')]) {
+                sh 'devsecops-scan triage $SCAN_ID_ARGS --out "$REPORTS_DIR/triage-$SCAN_PREFIX.json" --md "$REPORTS_DIR/triage-$SCAN_PREFIX.md"'
+              }
+            } else {
+              sh 'devsecops-scan triage $SCAN_ID_ARGS --no-ai --out "$REPORTS_DIR/triage-$SCAN_PREFIX.json" --md "$REPORTS_DIR/triage-$SCAN_PREFIX.md"'
+            }
+          }
+        }
+      }
+    }
+
+    stage('DefectDojo import') {
+      // One DefectDojo test per tool, reimported every build (closes fixed findings), in the
+      // product for this repository and an engagement per branch. AI verdicts and correlation
+      // become tags (ai-*, corr-*). Failed scans are skipped so their findings stay open.
+      when { expression { env.DEFECTDOJO_URL?.trim() && env.DEFECTDOJO_CREDENTIALS_ID?.trim() } }
+      steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+          script {
+            // Multibranch jobs are named <folder>/<repo>/<branch>: use the repo; plain jobs: the job name.
+            def parts = env.JOB_NAME.split('/')
+            def product = env.DEFECTDOJO_PRODUCT?.trim() ?: ((env.BRANCH_NAME && parts.length > 1) ? parts[-2] : parts[-1])
+            def branch = env.BRANCH_NAME ?: (env.GIT_BRANCH ?: 'main').replaceFirst('^origin/', '')
+            withEnv([
+              "DD_PRODUCT=${product}",
+              "DD_PRODUCT_TYPE=${env.DEFECTDOJO_PRODUCT_TYPE?.trim() ?: 'DevSecOps'}",
+              "DD_ENGAGEMENT=CI/CD ${branch}",
+              "DD_BRANCH=${branch}"
+            ]) {
+              withCredentials([string(credentialsId: env.DEFECTDOJO_CREDENTIALS_ID, variable: 'DEFECTDOJO_API_KEY')]) {
+                sh '''
+                  set -eu
+                  triage="$REPORTS_DIR/triage-$SCAN_PREFIX.json"
+                  [ -f "$triage" ] && set -- --triage "$triage" || set --
+                  devsecops-scan defectdojo $SCAN_ID_ARGS "$@" \
+                    --product "$DD_PRODUCT" --product-type "$DD_PRODUCT_TYPE" --engagement "$DD_ENGAGEMENT" \
+                    --branch "$DD_BRANCH" --commit "${GIT_COMMIT:-}" --build-id "$BUILD_NUMBER" ${GIT_URL:+--scm-uri "$GIT_URL"}
+                '''
+              }
+            }
+          }
+        }
+      }
+    }
+
     stage('Security gate') {
       steps {
-        script {
-          def ids = ["sast-opengrep-${env.SCAN_PREFIX}", "sca-osv-scanner-${env.SCAN_PREFIX}", "sca-trivy-${env.SCAN_PREFIX}"]
-          if (params.IMAGE_REF?.trim()) { ids << "container-trivy-${env.SCAN_PREFIX}" }
-          if (params.DAST_TARGET_URL?.trim()) { ids << "dast-nuclei-${env.SCAN_PREFIX}" }
-          def args = ids.collect { "--scan-id ${it}" }.join(' ')
-
-          sh "devsecops-scan report ${args} --format markdown --out security-reports/summary-${env.SCAN_PREFIX}.md"
-          // Exit 1 (policy FAIL) or 2 (missing/broken results) fails the build here.
-          sh "devsecops-scan gate ${args}"
-        }
+        sh 'devsecops-scan report $SCAN_ID_ARGS --format markdown --out "security-reports/summary-$SCAN_PREFIX.md"'
+        // Exit 1 (policy FAIL) or 2 (missing/broken results) fails the build here. The gate
+        // reads the raw scan results only; triage verdicts never change it.
+        sh 'devsecops-scan gate $SCAN_ID_ARGS'
       }
     }
   }
