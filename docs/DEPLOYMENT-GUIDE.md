@@ -244,6 +244,8 @@ wsl --install --from-file C:\WSL\ubuntu.wsl
 
 ## 5. Topology B: Jenkins with Docker agents
 
+> To try the pipeline on one machine first (Jenkins itself in Docker, Linux or Windows/WSL2), follow [JENKINS-SETUP.md](JENKINS-SETUP.md) (Vietnamese).
+
 ### 5.1 Jenkins prerequisites
 
 1. Agents with Docker that can pull `$REGISTRY/devsecops-scanner:$VERSION`. Run `docker login` on the agent, or configure registry credentials in Jenkins.

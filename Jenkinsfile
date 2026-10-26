@@ -2,7 +2,7 @@
 // scanner image; results are stored as JSON + SARIF; the build is gated on the CLI exit code.
 //
 // Required plugins: Pipeline, Docker Pipeline, Timestamper, Warnings Next Generation (SARIF).
-// Setup walkthrough: docs/DEPLOYMENT-GUIDE.md.
+// Setup walkthrough: docs/DEPLOYMENT-GUIDE.md (single-machine lab: docs/JENKINS-SETUP.md).
 // On Kubernetes, replace the docker agent with the pod template in
 // deploy/k8s/jenkins/scanner-pod.yaml (see the comment at the agent block).
 //
