@@ -15,7 +15,8 @@
     "start:mcp": "npm run build && npm start",
     "dev": "ts-node src/mcp/server.ts",
     "scan": "node dist/src/cli.js",
-    "security:scan": "npm audit --audit-level high"
+    "security:scan": "npm audit --audit-level high",
+    "rules:ids": "node tools/generate-rule-ids.mjs"
   },
   "keywords": [
     "mcp",

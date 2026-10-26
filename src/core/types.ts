@@ -26,6 +26,8 @@ export interface Finding {
   /** Stable identifier of this finding inside the scan (used for dedup). */
   id: string;
   rule_id: string;
+  /** The scanner's own rule identifier, when rule_id is a project ID mapped from it (sast-<language>-<NNNN>). */
+  original_rule_id?: string;
   title: string;
   severity: Severity;
   description?: string;

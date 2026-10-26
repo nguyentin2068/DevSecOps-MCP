@@ -1,14 +1,21 @@
-# Small offline Semgrep ruleset (no registry access needed). Ported from the custom_rules of
-# the original security-rules.yml. Use it on air-gapped runners or alongside the registry packs:
-#   sast.semgrep.configs: [src/config/semgrep/baseline.yml]
+# Small offline ruleset bundled with the scanner (no registry access needed), always run via
+# sast.opengrep.configs. Ported from the custom_rules of the original security-rules.yml.
+#
+# Rule IDs follow the project scheme sast-<language>-<NNNN>, one language per rule, and share
+# the numbering with the opengrep-rules catalog (rule-ids.json): to add a rule, take the next
+# free number of its language from both files, then re-run tools/generate-rule-ids.mjs only
+# when the catalog changes (it never reuses these numbers).
+# JavaScript rules also cover TypeScript.
 rules:
-  - id: hardcoded-secret
+  # --- JavaScript / TypeScript -------------------------------------------------------------
+  - id: sast-javascript-0001
     message: Hardcoded credential. Load it from a secret store or environment variable instead.
     severity: ERROR
-    languages: [javascript, typescript, python]
+    languages: [javascript, typescript]
     metadata:
       cwe: "CWE-798: Use of Hard-coded Credentials"
       category: security
+      former_id: hardcoded-secret
     patterns:
       - pattern-either:
           - pattern: $KEY = "$VALUE"
@@ -22,39 +29,28 @@ rules:
           metavariable: $VALUE
           regex: ^.{6,}$
 
-  - id: sql-injection-string-building
+  - id: sast-javascript-0002
     message: SQL query built from untrusted input. Use parameterized queries.
     severity: ERROR
     languages: [javascript, typescript]
     metadata:
       cwe: "CWE-89: SQL Injection"
       category: security
+      former_id: sql-injection-string-building
     pattern-either:
       - pattern: $DB.query("..." + $X, ...)
       - pattern: $DB.query(`...${$X}...`, ...)
       - pattern: $DB.execute("..." + $X, ...)
       - pattern: $DB.execute(`...${$X}...`, ...)
 
-  - id: python-sql-injection-string-building
-    message: SQL query built from untrusted input. Use parameterized queries.
-    severity: ERROR
-    languages: [python]
-    metadata:
-      cwe: "CWE-89: SQL Injection"
-      category: security
-    pattern-either:
-      - pattern: $CUR.execute("..." + $X, ...)
-      - pattern: $CUR.execute(f"...", ...)
-      - pattern: $CUR.execute("..." % $X, ...)
-      - pattern: $CUR.execute("...".format(...), ...)
-
-  - id: command-injection
+  - id: sast-javascript-0003
     message: Shell command built from untrusted input. Use execFile/spawn with an argument array.
     severity: ERROR
     languages: [javascript, typescript]
     metadata:
       cwe: "CWE-78: OS Command Injection"
       category: security
+      former_id: command-injection
     pattern-either:
       - pattern: require('child_process').exec("..." + $X, ...)
       - pattern: $CP.exec("..." + $X, ...)
@@ -62,48 +58,106 @@ rules:
       - pattern: $CP.execSync("..." + $X, ...)
       - pattern: $CP.execSync(`...${$X}...`, ...)
 
-  - id: python-command-injection
-    message: Shell command built from untrusted input. Pass an argument list and shell=False.
-    severity: ERROR
-    languages: [python]
-    metadata:
-      cwe: "CWE-78: OS Command Injection"
-      category: security
-    pattern-either:
-      - pattern: os.system($X)
-      - pattern: subprocess.$FN(..., shell=True, ...)
-
-  - id: code-injection-eval
+  - id: sast-javascript-0004
     message: eval() on dynamic input allows code injection.
     severity: ERROR
-    languages: [javascript, typescript, python]
+    languages: [javascript, typescript]
     metadata:
       cwe: "CWE-95: Eval Injection"
       category: security
+      former_id: code-injection-eval
     patterns:
       - pattern: eval($X)
       - pattern-not: eval("...")
 
-  - id: dom-xss-innerhtml
+  - id: sast-javascript-0005
     message: Assigning dynamic content to innerHTML enables DOM XSS. Use textContent or sanitize.
     severity: WARNING
     languages: [javascript, typescript]
     metadata:
       cwe: "CWE-79: Cross-site Scripting"
       category: security
+      former_id: dom-xss-innerhtml
     patterns:
       - pattern: $EL.innerHTML = $X
       - pattern-not: $EL.innerHTML = "..."
 
-  - id: weak-hash
+  - id: sast-javascript-0006
     message: MD5/SHA1 are not suitable for passwords or integrity protection.
     severity: WARNING
-    languages: [javascript, typescript, python]
+    languages: [javascript, typescript]
     metadata:
       cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
       category: security
+      former_id: weak-hash
     pattern-either:
       - pattern: crypto.createHash("md5")
       - pattern: crypto.createHash("sha1")
+
+  # --- Python ------------------------------------------------------------------------------
+  - id: sast-python-0001
+    message: Hardcoded credential. Load it from a secret store or environment variable instead.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      category: security
+      former_id: hardcoded-secret
+    patterns:
+      - pattern: $KEY = "$VALUE"
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(password|passwd|secret|api_?key|token|private_?key).*
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^.{6,}$
+
+  - id: sast-python-0002
+    message: SQL query built from untrusted input. Use parameterized queries.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      category: security
+      former_id: python-sql-injection-string-building
+    pattern-either:
+      - pattern: $CUR.execute("..." + $X, ...)
+      - pattern: $CUR.execute(f"...", ...)
+      - pattern: $CUR.execute("..." % $X, ...)
+      - pattern: $CUR.execute("...".format(...), ...)
+
+  - id: sast-python-0003
+    message: Shell command built from untrusted input. Pass an argument list and shell=False.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-78: OS Command Injection"
+      category: security
+      former_id: python-command-injection
+    pattern-either:
+      - pattern: os.system($X)
+      - pattern: subprocess.$FN(..., shell=True, ...)
+
+  - id: sast-python-0004
+    message: eval() on dynamic input allows code injection.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      cwe: "CWE-95: Eval Injection"
+      category: security
+      former_id: code-injection-eval
+    patterns:
+      - pattern: eval($X)
+      - pattern-not: eval("...")
+
+  - id: sast-python-0005
+    message: MD5/SHA1 are not suitable for passwords or integrity protection.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      category: security
+      former_id: weak-hash
+    pattern-either:
       - pattern: hashlib.md5(...)
       - pattern: hashlib.sha1(...)

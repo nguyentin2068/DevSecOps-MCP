@@ -12,6 +12,7 @@ import { errorMessage, logger } from './logger';
 import { evaluatePolicy, PolicyDecision } from './policy';
 import { ToolLog } from './process';
 import { assertScanId, newScanId, ReportStore } from './report-store';
+import { loadRuleIdCatalog } from './rule-ids';
 import { runKatana } from './scanners/katana';
 import { runNuclei } from './scanners/nuclei';
 import { runOpengrep } from './scanners/opengrep';
@@ -167,6 +168,7 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
     const configs = Array.from(
       new Set(entries.map((config) => (REGISTRY_CONFIG.test(config) ? config : resolveConfigPath(config, rules, env))))
     );
+    const ruleIds = opengrep.rule_ids ? loadRuleIdCatalog(resolveConfigPath(opengrep.rule_ids, rules, env)) : undefined;
     logger.info('SAST languages', { languages, configs: configs.length });
     log?.(`[sast] languages: ${languages.length ? languages.join(', ') : 'none (common rules only)'}`);
     return {
@@ -179,7 +181,8 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
           timeoutSeconds: opengrep.timeout_seconds,
           taintIntrafile: opengrep.taint_intrafile,
           env,
-          log
+          log,
+          ...(ruleIds ? { ruleIds } : {})
         });
         return { ...output, metadata: { ...output.metadata, languages } };
       }
