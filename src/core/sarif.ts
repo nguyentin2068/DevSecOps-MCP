@@ -35,13 +35,15 @@ export function toSarif(result: ScanResult): Record<string, unknown> {
     if (rules.has(finding.rule_id)) continue;
     rules.set(finding.rule_id, {
       id: finding.rule_id,
-      name: finding.rule_id,
+      // Human-readable name: the scanner's own rule name when rule_id is a project ID.
+      name: finding.original_rule_id?.split('.').pop() ?? finding.rule_id,
       shortDescription: { text: finding.title.slice(0, 1024) },
       ...(finding.description ? { fullDescription: { text: finding.description.slice(0, 4096) } } : {}),
       ...(finding.references?.[0] ? { helpUri: finding.references[0] } : {}),
       properties: {
         'security-severity': SECURITY_SEVERITY[finding.severity],
-        tags: ['security', result.scan_type, ...(finding.cwe ?? [])]
+        tags: ['security', result.scan_type, ...(finding.cwe ?? [])],
+        ...(finding.original_rule_id ? { original_rule_id: finding.original_rule_id } : {})
       }
     });
   }

@@ -1,6 +1,7 @@
 import path from 'path';
 import { validateOptionValue } from '../guards';
 import { parseJsonOutput, runCommand, stderrTail, ToolLog } from '../process';
+import { RuleIdCatalog } from '../rule-ids';
 import { Finding, ScannerOutput, Severity, UNKNOWN_SEVERITY } from '../types';
 
 export interface OpengrepOptions {
@@ -13,6 +14,8 @@ export interface OpengrepOptions {
   env?: NodeJS.ProcessEnv;
   /** Stream the scanner's own log (stderr) here; the scanner's quiet mode is turned off. */
   log?: ToolLog;
+  /** Maps Opengrep check_ids to project rule IDs (sast-<language>-<NNNN>). */
+  ruleIds?: RuleIdCatalog;
 }
 
 interface OpengrepResult {
@@ -56,18 +59,23 @@ function asList(value: string | string[] | undefined): string[] {
 }
 
 /** Opengrep keeps Semgrep's JSON output format (it forked Semgrep 1.100). */
-export function parseOpengrep(output: OpengrepOutput, targetRoot: string): ScannerOutput {
+export function parseOpengrep(output: OpengrepOutput, targetRoot: string, ruleIds?: RuleIdCatalog): ScannerOutput {
+  const unmapped = new Set<string>();
   const findings: Finding[] = (output.results ?? []).map((result) => {
     const file = path.isAbsolute(result.path) ? path.relative(targetRoot, result.path) : result.path;
     const line = result.start?.line ?? 0;
     const metadata = result.extra?.metadata ?? {};
+    const projectId = ruleIds?.lookup(result.check_id);
+    if (ruleIds && !projectId) unmapped.add(result.check_id);
+    const ruleId = projectId ?? result.check_id;
     const finding: Finding = {
-      id: `${result.check_id}:${file}:${line}`,
-      rule_id: result.check_id,
+      id: `${ruleId}:${file}:${line}`,
+      rule_id: ruleId,
       title: (result.extra?.message ?? '').split('\n')[0]?.slice(0, 200) || (result.check_id.split('.').pop() ?? result.check_id),
       severity: SEVERITY_MAP[(result.extra?.severity ?? '').toUpperCase()] ?? UNKNOWN_SEVERITY,
       location: { path: file, line }
     };
+    if (projectId && projectId !== result.check_id) finding.original_rule_id = result.check_id;
     if (result.extra?.message) finding.description = result.extra.message;
     if (result.extra?.fix) finding.fix = result.extra.fix;
     const cwe = asList(metadata.cwe);
@@ -81,7 +89,9 @@ export function parseOpengrep(output: OpengrepOutput, targetRoot: string): Scann
     findings,
     metadata: {
       scanner_version: output.version,
-      scanner_errors: (output.errors ?? []).map((error) => error.message ?? 'unknown error').slice(0, 20)
+      scanner_errors: (output.errors ?? []).map((error) => error.message ?? 'unknown error').slice(0, 20),
+      // Rules without a project ID (e.g. your own rule files) keep Opengrep's check_id.
+      ...(unmapped.size ? { unmapped_rule_ids: Array.from(unmapped).sort().slice(0, 50) } : {})
     }
   };
 }
@@ -107,5 +117,5 @@ export async function runOpengrep(target: string, options: OpengrepOptions): Pro
   if (code !== 0 && code !== 1) {
     throw new Error(`opengrep exited with code ${code}: ${stderrTail(stderr)}`);
   }
-  return parseOpengrep(parseJsonOutput<OpengrepOutput>('opengrep', stdout), target);
+  return parseOpengrep(parseJsonOutput<OpengrepOutput>('opengrep', stdout), target, options.ruleIds);
 }

@@ -121,6 +121,14 @@ docker build --target scanner \
   -t $REGISTRY/devsecops-scanner:$VERSION .
 ```
 
+When you bump `OPENGREP_RULES_COMMIT`, regenerate the rule ID catalog from a checkout of the new commit and commit the result. Existing IDs are kept; new rules get the next number of their language:
+
+```bash
+git clone https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+git -C /tmp/opengrep-rules checkout <commit>
+npm run rules:ids -- --rules-dir /tmp/opengrep-rules --source opengrep-rules@<commit>
+```
+
 When you bump Opengrep, also update `OPENGREP_SHA256`. Compute it from the release binary:
 
 ```bash
@@ -425,7 +433,7 @@ docker run --rm -v $PWD/.devsecops:/rules:ro $REGISTRY/devsecops-scanner:$VERSIO
 | Setting | Default | Recommendation |
 |---|---|---|
 | `global_policy.enforcement_level` | `strict` | Start with `permissive` for one or two weeks to see the results without failing builds, then switch to `strict`. |
-| `sast.thresholds` | critical/high 0; medium/low not gated | Keep. After triage, set `medium` to a number. Suppress reviewed false positives inline: `// nosemgrep: <rule-id>` with a reason. |
+| `sast.thresholds` | critical/high 0; medium/low not gated | Keep. After triage, set `medium` to a number. Suppress reviewed false positives inline: `// nosemgrep: <rule-name>` with a reason, where the name is the last part of the finding's `original_rule_id` (findings show project IDs such as `sast-python-0006`). |
 | `sast.opengrep.configs` | baseline + secrets | Rules that always run. Add your own rule files here. |
 | `sast.opengrep.language_configs` | one entry per language in opengrep-rules | Only the detected languages run. Remove a language to stop scanning it; point an entry at your own rules to replace the defaults. |
 | `sca.thresholds` | critical/high 0; medium 3; low 10 | Adjust to your patching SLA. |

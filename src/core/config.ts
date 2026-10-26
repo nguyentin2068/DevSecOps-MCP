@@ -32,6 +32,8 @@ export interface SecurityRules {
       configs: string[];
       /** Extra rule sets per language, run only when that language is scanned. */
       language_configs: Record<string, string[]>;
+      /** Catalog mapping opengrep-rules rules to project IDs (sast-<language>-<NNNN>); null = keep Opengrep's ids. */
+      rule_ids: string | null;
       exclude: string[];
     };
   };
@@ -91,6 +93,7 @@ const schema = Joi.object<SecurityRules>({
       taint_intrafile: Joi.boolean().default(true),
       configs: optionList.min(1).default(['opengrep/baseline.yml']),
       language_configs: Joi.object().pattern(/^[a-z][a-z0-9_-]{0,31}$/, optionList.min(1)).default({}),
+      rule_ids: Joi.string().pattern(/^[^-]/).max(512).allow(null).default(null),
       exclude: optionList.default([])
     }).default()
   }).default(),

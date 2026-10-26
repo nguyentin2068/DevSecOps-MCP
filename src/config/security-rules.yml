@@ -70,6 +70,11 @@ sast:
       # Most JavaScript rules also match TypeScript.
       typescript: ["${OPENGREP_RULES_DIR}/javascript", "${OPENGREP_RULES_DIR}/typescript"]
       yaml: ["${OPENGREP_RULES_DIR}/yaml"]
+    # Project rule IDs: findings report sast-<language>-<NNNN> instead of Opengrep's path-based
+    # check_id, which is kept as original_rule_id. The catalog covers the pinned opengrep-rules
+    # commit; regenerate it with tools/generate-rule-ids.mjs when bumping that commit. The bundled
+    # rules (opengrep/baseline.yml) already carry project IDs. null = keep Opengrep's ids.
+    rule_ids: opengrep/rule-ids.json
     # Also skipped by language detection (plain directory names only).
     exclude:
       - security-reports

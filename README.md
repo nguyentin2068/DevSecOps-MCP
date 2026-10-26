@@ -118,6 +118,14 @@ docker compose run --rm scanner devsecops-scan sast --target /workspace/src --la
 
 The languages used are recorded in the SAST result's `metadata.languages`.
 
+**Rule IDs:** SAST findings use project rule IDs of the form `sast-<language>-<NNNN>` (for example `sast-python-0006`), grouped by language, instead of Opengrep's path-based ids such as `opt.opengrep-rules.python.django.security.injection.sql.sql-injection-using-raw`. The Opengrep id is kept in the finding's `original_rule_id` (and in the SARIF rule properties).
+
+- The bundled rules (`src/config/opengrep/baseline.yml`) carry their project IDs directly: `sast-javascript-0001`–`0006` (they also cover TypeScript) and `sast-python-0001`–`0005`. Their old names are kept in `metadata.former_id`.
+- opengrep-rules is mapped through the catalog `src/config/opengrep/rule-ids.json` (`sast.opengrep.rule_ids`). The language is the rule's top-level directory in opengrep-rules, so `generic/secrets` rules become `sast-generic-NNNN`.
+- IDs are stable. When you bump `OPENGREP_RULES_COMMIT`, run `npm run rules:ids -- --rules-dir <checkout of that commit> --source opengrep-rules@<commit>`. Existing rules keep their numbers, new rules get the next free number of their language, and the numbers of removed rules are never reused. `--check` exits 1 when a rule has no ID.
+- Rules from your own rule files that are not in the catalog keep Opengrep's id and are listed in the result's `metadata.unmapped_rule_ids`. Give them project IDs by naming them `sast-<language>-<NNNN>` directly, as `baseline.yml` does.
+- Inline suppressions are matched by Opengrep, so they take the Opengrep rule name (the last part of `original_rule_id`), not the project ID: `// nosemgrep: sql-injection-using-raw`. For the bundled rules, the two are the same.
+
 **Scanner logs:** while a scan runs, the CLI streams each scanner's own log to stderr, one line at a time with the tool name as a prefix, together with the exact command line and the exit status:
 
 ```
