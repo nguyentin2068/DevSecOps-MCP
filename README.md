@@ -8,7 +8,7 @@ Self-hosted security scanning for CI pipelines, with a read-only MCP server for 
   - **Container images:** Trivy
   - **DAST:** Nuclei, with Katana crawling for the fuzzing pass
 - **Every result is stored as JSON and SARIF** under `security-reports/<scan_id>/`. A **real security gate** (thresholds in `security-rules.yml`) sets the CLI exit code that passes or fails the build.
-- **The MCP server only reads results.** It lists and summarizes them for an LLM client, evaluates the policy and renders reports. It cannot start scans or fetch URLs. It runs over authenticated HTTP or stdio.
+- **The MCP server is optional and only reads results.** It lists and summarizes them for an LLM client, evaluates the policy and renders reports. It cannot start scans or fetch URLs. It runs over authenticated HTTP or stdio.
 - **Everything is self-hosted** and needs no long-running scanner services: Docker Compose for a workstation, Kustomize manifests for Kubernetes.
 
 ```
@@ -60,11 +60,11 @@ Images (one `Dockerfile`, two targets):
 
 Trying it on one machine takes a few minutes. For production setups (registry, Jenkins, Kubernetes, TLS), follow the [deployment guide](docs/DEPLOYMENT-GUIDE.md).
 
+The scanner works on its own. The MCP server is an optional add-on for AI triage, and nothing in the scan or gate path depends on it.
+
 ```bash
-cp .env.example .env                  # set MCP_AUTH_TOKEN (openssl rand -hex 32)
 mkdir -p security-reports
-docker compose up -d --build mcp      # the MCP server
-docker compose build scanner          # the scanner image (profile "scan")
+docker compose build scanner          # the scanner image; no .env needed
 ```
 
 Run scans with the scanner image. `SCAN_SOURCE` in `.env` picks the source tree; the default is `./test-samples`, which contains deliberately vulnerable code.
@@ -78,9 +78,13 @@ docker compose --profile demo up -d dast-target
 docker compose run --rm scanner devsecops-scan dast --target http://dast-target:3001/
 ```
 
-Then check the MCP server:
+Results are written to `./security-reports/<scan_id>/` as JSON + SARIF. Render them with `docker compose run --rm scanner devsecops-scan report --scan-id <id> --format markdown`, open the `.sarif` files in an IDE (for example the VS Code SARIF Viewer), or publish them in Jenkins.
+
+**Optional: add the MCP server** (profile `mcp`) to let an AI assistant read and triage those results:
 
 ```bash
+cp .env.example .env                  # set MCP_AUTH_TOKEN (openssl rand -hex 32)
+docker compose --profile mcp up -d --build mcp
 curl -s http://127.0.0.1:3000/health                     # {"status":"ok"}
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp   # 401 without a token
 ```
@@ -191,7 +195,12 @@ What the base deploys:
 - **NetworkPolicies**: default deny for ingress; MCP only accepts traffic from namespaces labelled `devsecops.io/mcp-client=true`.
 - The namespace enforces the Pod Security `restricted` standard.
 
-`deploy/k8s/examples/scan-job.yaml` shows an on-demand scan Job. It clones a repo, runs the scans and the gate, and writes the results to the PVC.
+Two on-demand scan Job examples:
+
+- `deploy/k8s/examples/scan-job.yaml` clones a repo, runs the scans and the gate, and writes the results to the PVC shared with the MCP server.
+- `deploy/k8s/examples/scan-job-standalone.yaml` needs neither the MCP server nor the base manifests: it prints the markdown report to the logs, and the Job status is the gate result.
+
+**Without the MCP server**, skip the base entirely: use the Jenkins pod template or the standalone Job in any namespace.
 
 Scanner pods carry the label `devsecops.io/scanner=true`. Use it to restrict their egress, for example DAST only to your staging CIDRs. The full walkthrough (overlay, storage class, Ingress with TLS, Jenkins agents writing to the PVC) is in [deployment guide §6](docs/DEPLOYMENT-GUIDE.md#6-topology-c-kubernetes).
 

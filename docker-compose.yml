@@ -1,12 +1,16 @@
-# Local self-hosted stack: the read-only MCP server and an on-demand scanner container (the
-# same image Jenkins uses: Opengrep, OSV-Scanner, Trivy, Katana + Nuclei).
+# Local self-hosted stack: an on-demand scanner container (the same image Jenkins uses:
+# Opengrep, OSV-Scanner, Trivy, Katana + Nuclei) and, optionally, the read-only MCP server.
 #
-#   cp .env.example .env            # then fill in MCP_AUTH_TOKEN
+# Scanner only (no MCP, no .env needed):
 #   mkdir -p security-reports
-#   docker compose up -d --build mcp
+#   docker compose build scanner
 #   docker compose run --rm scanner devsecops-scan sast --target /workspace/src
 #
-# Secrets have no defaults on purpose: compose refuses to start until .env provides them.
+# With the MCP server (profile "mcp"; set MCP_AUTH_TOKEN in .env first):
+#   cp .env.example .env
+#   docker compose --profile mcp up -d --build mcp
+#
+# The MCP server refuses to start without a token of at least 32 characters.
 # Published ports bind to 127.0.0.1 only; put a TLS reverse proxy in front for remote access.
 
 name: devsecops
@@ -18,7 +22,9 @@ x-hardening: &hardening
     - ALL
 
 services:
+  # Optional read-only MCP server for AI triage: docker compose --profile mcp up -d mcp
   mcp:
+    profiles: [mcp]
     build:
       context: .
       target: mcp
@@ -31,7 +37,9 @@ services:
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
       MCP_PORT: "3000"
-      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env (openssl rand -hex 32)}
+      # Not enforced here so scanner-only use needs no .env; the server itself refuses to start
+      # without a token of at least 32 characters (openssl rand -hex 32).
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       REPORTS_DIR: /app/security-reports
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
@@ -71,6 +79,10 @@ services:
   # Deliberately vulnerable demo app for trying DAST: docker compose --profile demo up -d dast-target
   # then: docker compose run --rm scanner devsecops-scan dast --target http://dast-target:3001/
   dast-target:
+    # Reuses the MCP image (Node + express) only as a runtime for the demo app.
+    build:
+      context: .
+      target: mcp
     image: devsecops-mcp:${IMAGE_TAG:-local}
     profiles: [demo]
     <<: *hardening

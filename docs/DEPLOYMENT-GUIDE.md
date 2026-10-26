@@ -1,6 +1,8 @@
 # Deployment Guide
 
-Step-by-step setup for the DevSecOps scanner and the read-only MCP server. Pick one of three topologies, follow its section end to end, then finish with [the verification checklist](#9-verification-checklist).
+Step-by-step setup for the DevSecOps scanner and the optional read-only MCP server. Pick one of three topologies, follow its section end to end, then finish with [the verification checklist](#9-verification-checklist).
+
+> **The MCP server is optional.** Scanning, the security gate, the JSON/SARIF results, markdown reports and Jenkins publishing all work without it. Without MCP, skip [3](#3-generate-secrets), [4.2](#42-optional-start-the-mcp-server), [5.4](#54-deliver-results-to-the-mcp-server), [6.1–6.4](#6-topology-c-kubernetes) and [8](#8-connect-mcp-clients).
 
 | Topology | Use it when | Sections |
 |---|---|---|
@@ -132,7 +134,7 @@ sha256sum opengrep
 
 ## 3. Generate secrets
 
-The only secret is the MCP bearer token. It must be at least 32 characters, and the MCP server refuses to start in HTTP mode without one.
+Only needed if you run the MCP server. The only secret is the MCP bearer token. It must be at least 32 characters, and the MCP server refuses to start in HTTP mode without one.
 
 ```bash
 openssl rand -hex 32
@@ -147,9 +149,9 @@ Store it in your secret manager. Clients need the same value. To rotate it, see 
 ### 4.1 Configure
 
 ```bash
-cp .env.example .env
+cp .env.example .env             # optional for scanner-only use
 # edit .env:
-#   MCP_AUTH_TOKEN=<value from step 3>
+#   MCP_AUTH_TOKEN=<value from step 3>   # only for the MCP server
 #   IMAGE_TAG=2.1.0              # if you pulled published images instead of building locally
 mkdir -p security-reports
 sudo chown 1000:1000 security-reports   # the scanner writes as uid 1000
@@ -157,10 +159,12 @@ sudo chown 1000:1000 security-reports   # the scanner writes as uid 1000
 
 If your registry images have different names, retag them locally to match `docker-compose.yml`, for example: `docker tag $REGISTRY/devsecops-mcp:2.1.0 devsecops-mcp:2.1.0`.
 
-### 4.2 Start the MCP server
+### 4.2 (Optional) Start the MCP server
+
+The MCP server lives in the Compose profile `mcp`. Skip this step for scanner-only use.
 
 ```bash
-docker compose up -d mcp              # add --build to build locally instead
+docker compose --profile mcp up -d mcp   # add --build to build locally instead
 docker compose ps                     # mcp should become "healthy"
 curl -s http://127.0.0.1:3000/health  # {"status":"ok"}
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp   # 401
@@ -180,7 +184,7 @@ docker compose run --rm scanner devsecops-scan sca  --target /workspace/src     
 docker compose run --rm scanner devsecops-scan sca  --target /workspace/src --tool trivy
 ```
 
-Results appear in `./security-reports/<scan_id>/`, and the MCP server sees them immediately.
+Results appear in `./security-reports/<scan_id>/` (and, if it runs, the MCP server sees them immediately). Without MCP, read them with `docker compose run --rm scanner devsecops-scan report --scan-id <id> --format markdown` or open the `.sarif` files in your IDE.
 
 ### 4.4 Try DAST against the demo app
 
@@ -282,6 +286,8 @@ If the agents and the MCP server run on different hosts, use a shared filesystem
 
 ## 6. Topology C: Kubernetes
 
+Without the MCP server, skip 6.1–6.4 (the base only deploys MCP-related objects) and go to [6.5](#65-run-scans-in-the-cluster), using the Jenkins pod template or `scan-job-standalone.yaml` in any namespace.
+
 The Kustomize base in `deploy/k8s/base` deploys the MCP server, the shared `security-reports` PVC and NetworkPolicies into the `devsecops` namespace. That namespace enforces the Pod Security `restricted` standard. Scanners run as Jenkins Kubernetes agents or as Jobs.
 
 ### 6.1 Prepare an overlay
@@ -375,7 +381,14 @@ For an Ingress example, see [8.3](#83-exposing-the-mcp-server-over-the-network).
 
 **Option 2: on-demand Jobs (no Jenkins).**
 
-Edit `REPO_URL`, `REPO_REF` and the image in `deploy/k8s/examples/scan-job.yaml`, then:
+Without MCP, use `deploy/k8s/examples/scan-job-standalone.yaml`. It needs no PVC and works in any namespace; it prints the markdown report to the logs, and the Job status is the gate result:
+
+```bash
+kubectl -n <namespace> create -f deploy/k8s/examples/scan-job-standalone.yaml
+kubectl -n <namespace> logs -f job/<generated-name> -c scanner
+```
+
+With MCP, edit `REPO_URL`, `REPO_REF` and the image in `deploy/k8s/examples/scan-job.yaml`, then:
 
 ```bash
 kubectl -n devsecops create -f deploy/k8s/examples/scan-job.yaml
@@ -496,7 +509,7 @@ Run through this after the first deployment and after every upgrade.
 
 ### Rotate the MCP token
 
-Update the secret (`.env` and `docker compose up -d mcp`, or the Kubernetes Secret followed by `kubectl -n devsecops rollout restart deploy/mcp`), then give clients the new value. The old token stops working on restart.
+Update the secret (`.env` and `docker compose --profile mcp up -d mcp`, or the Kubernetes Secret followed by `kubectl -n devsecops rollout restart deploy/mcp`), then give clients the new value. The old token stops working on restart.
 
 ### Upgrade
 
