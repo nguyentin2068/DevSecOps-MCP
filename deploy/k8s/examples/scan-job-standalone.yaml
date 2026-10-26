@@ -1,0 +1,108 @@
+# Scanner-only Job: needs neither the MCP server nor the base manifests (no PVC). It clones a
+# repository, scans it, prints the markdown report to the logs, and the Job status is the
+# gate result (Complete = PASS/WARN, Failed = policy FAIL or scanner error).
+#   kubectl -n <namespace> create -f deploy/k8s/examples/scan-job-standalone.yaml
+#   kubectl -n <namespace> logs -f job/<generated-name> -c scanner
+# Results live in an emptyDir and disappear with the pod; use scan-job.yaml (shared PVC) or
+# Jenkins archiving if you need to keep them.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: devsecops-scan-
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        devsecops.io/scanner: "true"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: clone
+          image: alpine/git:2.49.1
+          args: ["clone", "--depth", "1", "--branch", "$(REPO_REF)", "$(REPO_URL)", "/workspace/src"]
+          env:
+            - name: REPO_URL
+              value: https://github.com/nguyentin2068/DevSecOps-MCP.git
+            - name: REPO_REF
+              value: main
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: scanner
+          image: registry.example.com/devsecops-scanner:2.0.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              id="$(date -u +%Y%m%dt%H%M%S)-${HOSTNAME##*-}"
+              devsecops-scan sca --tool trivy --target /workspace/src --scan-id "sca-trivy-job-$id" --no-fail
+              devsecops-scan sast --tool opengrep --target /workspace/src --scan-id "sast-opengrep-job-$id" --no-fail
+              ids="--scan-id sca-trivy-job-$id --scan-id sast-opengrep-job-$id"
+              devsecops-scan report $ids --format markdown
+              devsecops-scan gate $ids
+          env:
+            - name: SCAN_WORKSPACE_ROOTS
+              value: /workspace/src
+            - name: REPORTS_DIR
+              value: /workspace/security-reports
+            - name: TRIVY_CACHE_DIR
+              value: /var/cache/trivy
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace/src
+              subPath: src
+            - name: reports
+              mountPath: /workspace/security-reports
+            - name: trivy-cache
+              mountPath: /var/cache/trivy
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: reports
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: trivy-cache
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: tmp
+          emptyDir: {}
