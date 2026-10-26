@@ -1,10 +1,12 @@
 import path from 'path';
-import { parseJsonOutput, runCommand, stderrTail } from '../process';
+import { parseJsonOutput, runCommand, stderrTail, ToolLog } from '../process';
 import { Finding, ScannerOutput, Severity, UNKNOWN_SEVERITY, severityFromCvss } from '../types';
 
 export interface OsvOptions {
   bin: string;
   timeoutSeconds: number;
+  /** Stream the scanner's own log (stderr) here. */
+  log?: ToolLog;
 }
 
 interface OsvVulnerability {
@@ -108,7 +110,8 @@ export async function runOsvScanner(target: string, options: OsvOptions): Promis
   const args = ['scan', 'source', '--format', 'json', '--recursive', '--', target];
   const { code, stdout, stderr } = await runCommand(options.bin, args, {
     cwd: target,
-    timeoutMs: options.timeoutSeconds * 1000
+    timeoutMs: options.timeoutSeconds * 1000,
+    log: options.log
   });
 
   // 0 = clean, 1 = vulnerabilities found, 128 = no lockfiles/packages found.

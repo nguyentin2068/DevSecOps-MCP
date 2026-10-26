@@ -1,6 +1,6 @@
 import path from 'path';
 import { validateOptionValue } from '../guards';
-import { parseJsonOutput, runCommand, stderrTail } from '../process';
+import { parseJsonOutput, runCommand, stderrTail, ToolLog } from '../process';
 import { Finding, ScannerOutput, Severity, UNKNOWN_SEVERITY } from '../types';
 
 export interface OpengrepOptions {
@@ -11,6 +11,8 @@ export interface OpengrepOptions {
   /** Cross-function taint tracking within a file (Opengrep's --taint-intrafile). */
   taintIntrafile: boolean;
   env?: NodeJS.ProcessEnv;
+  /** Stream the scanner's own log (stderr) here; the scanner's quiet mode is turned off. */
+  log?: ToolLog;
 }
 
 interface OpengrepResult {
@@ -85,7 +87,8 @@ export function parseOpengrep(output: OpengrepOutput, targetRoot: string): Scann
 }
 
 export async function runOpengrep(target: string, options: OpengrepOptions): Promise<ScannerOutput> {
-  const args = ['scan', '--json', '--disable-version-check', '--quiet'];
+  const args = ['scan', '--json', '--disable-version-check'];
+  if (!options.log) args.push('--quiet');
   if (options.taintIntrafile) args.push('--taint-intrafile');
   for (const config of options.configs) args.push('--config', validateOptionValue(config, 'Opengrep config'));
   for (const pattern of options.exclude) args.push('--exclude', validateOptionValue(pattern, 'Opengrep exclude'));
@@ -97,7 +100,8 @@ export async function runOpengrep(target: string, options: OpengrepOptions): Pro
     timeoutMs: options.timeoutSeconds * 1000,
     // The bundled runtime reads rule files with the locale's encoding; without a UTF-8
     // locale (common in minimal containers) rules containing non-ASCII text fail to load.
-    env: { ...base, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }
+    env: { ...base, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+    log: options.log
   });
   // 0 = success, 1 = findings with --error; anything else is a scanner failure.
   if (code !== 0 && code !== 1) {

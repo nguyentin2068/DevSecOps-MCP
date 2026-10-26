@@ -104,7 +104,18 @@ devsecops-scan report --scan-id <id> [...] [--format markdown|json|sarif] [--out
 | `--scan-id` | Explicit id (`[a-z0-9_-]`, 3–128 characters). Generated when omitted. Existing ids are never overwritten. |
 | `--dast-mode` | `baseline` (Nuclei HTTP templates against the target) or `full` (adds a Katana crawl and the fuzzing templates on crawled URLs with parameters; active attacks, only against test environments). |
 | `--no-fail` | Exit 0 on a policy FAIL so later scans still run; a single `gate` decides at the end. |
+| `--quiet` | Do not stream the scanners' own logs, and run each scanner in its quiet mode. |
 | `--rules`, `--reports-dir` | Override `SECURITY_RULES_PATH` and `REPORTS_DIR`. |
+
+**Scanner logs:** while a scan runs, the CLI streams each scanner's own log to stderr, one line at a time with the tool name as a prefix, together with the exact command line and the exit status:
+
+```
+[opengrep] $ opengrep scan --json --disable-version-check --taint-intrafile --config ... -- /workspace/src
+[opengrep] ...the scanner's own progress and warnings...
+[opengrep] exited with 1 after 18.4s
+```
+
+Each scanner's own quiet mode is turned off for this: Trivy runs with `--no-progress` instead of `--quiet`, and Nuclei and Katana run without `-silent`. ANSI escapes and control characters are stripped, because the lines can echo file names and responses from the scanned target. Stdout keeps only the CLI's summary, so the two streams can be redirected separately (`2> scan.log`). Pass `--quiet` to turn the log off.
 
 **Exit codes:** `0` = policy PASS (or WARN under permissive enforcement), `1` = policy FAIL, `2` = scanner, usage or configuration error. A scanner error is still stored as a `failed` result, so the gate never passes on missing evidence.
 
@@ -284,6 +295,7 @@ When `opengrep` is available (on `PATH` or via `OPENGREP_PATH`), the test suite 
 | `Target path is outside the allowed workspace` | Scan inside `SCAN_WORKSPACE_ROOTS` (in Jenkins this is `$WORKSPACE`). |
 | `blocked address` for a DAST target | Use the staging host's real name, or add it to `dast.target_policy`. |
 | `osv-scanner exited with code 127 ... api.osv.dev` | The runner needs egress to `api.osv.dev`, or use `--tool trivy`. |
+| A scan fails or hangs and the reason is unclear | Read the `[tool]` lines on stderr: they show the exact command line, the scanner's own log and its exit status. Rerun without `--quiet` if it was set. |
 | Port 3000 already in use | Set `MCP_PORT` in `.env`. |
 
 ## Migrating from Semgrep, SonarQube and ZAP

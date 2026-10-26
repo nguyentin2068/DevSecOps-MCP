@@ -70,6 +70,45 @@ describe('devsecops-scan CLI', () => {
     expect(JSON.parse(readFileSync(path.join(reports, 'sast-cli-crash', 'result.json'), 'utf8')).status).toBe('failed');
   });
 
+  it('streams the scanner log to stderr with a [tool] prefix and control characters removed', async () => {
+    const file = path.join(bin, 'opengrep-log');
+    writeFileSync(`${file}.json`, JSON.stringify({ results: [], errors: [] }));
+    writeFileSync(file, `#!/bin/sh\necho "$@" > "${file}.args"\nprintf 'Scanning 3 files\\n\\033[31mred\\033[0m line\\r\\nprogress 50%%\\rprogress 100%%\\n' >&2\ncat "${file}.json"\n`);
+    chmodSync(file, 0o755);
+    const { io, out, err } = capture();
+    expect(await main(['sast', '--target', appDir], io, { ...baseEnv, OPENGREP_PATH: file })).toBe(EXIT.PASS);
+
+    expect(err[0]).toMatch(/^\[opengrep-log\] \$ .*opengrep-log scan --json /);
+    expect(err).toEqual(expect.arrayContaining([
+      '[opengrep-log] Scanning 3 files',
+      '[opengrep-log] red line',
+      '[opengrep-log] progress 50%',
+      '[opengrep-log] progress 100%'
+    ]));
+    expect(err.join('\n')).toMatch(/\[opengrep-log\] exited with 0 after \d+\.\ds/);
+    expect(err.join('\n')).not.toContain('\u001b');
+    // With logs on, the scanner's own quiet mode is off; stdout keeps only the summary.
+    expect(readFileSync(`${file}.args`, 'utf8')).not.toMatch(/--quiet/);
+    expect(out.join('\n')).not.toMatch(/Scanning 3 files/);
+  });
+
+  it('keeps the scanners quiet and prints no tool log with --quiet', async () => {
+    const env = { ...baseEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-quiet', { results: [], errors: [] }) };
+    const { io, err } = capture();
+    expect(await main(['sast', '--target', appDir, '--quiet'], io, env)).toBe(EXIT.PASS);
+    expect(err).toEqual([]);
+    expect(readFileSync(`${env.OPENGREP_PATH}.args`, 'utf8')).toMatch(/--quiet/);
+  });
+
+  it('reports the last stderr line of a failing scanner even after a long log', async () => {
+    const file = path.join(bin, 'opengrep-noisy');
+    writeFileSync(file, `#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do echo "progress line $i ................................" >&2; i=$((i+1)); done\necho "fatal: rule file is invalid" >&2\nexit 7\n`);
+    chmodSync(file, 0o755);
+    const { io, err } = capture();
+    expect(await main(['sast', '--target', appDir, '--quiet'], io, { ...baseEnv, OPENGREP_PATH: file })).toBe(EXIT.ERROR);
+    expect(err.join('\n')).toMatch(/opengrep exited with code 7: [\s\S]*fatal: rule file is invalid/);
+  });
+
   it('exits 2 when the scanner prints invalid JSON', async () => {
     const env = { ...baseEnv, OPENGREP_PATH: stubScanner(bin, 'opengrep-garbage', 'not json') };
     expect(await main(['sast', '--target', appDir], capture().io, env)).toBe(EXIT.ERROR);

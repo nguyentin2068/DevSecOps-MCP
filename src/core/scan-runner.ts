@@ -9,6 +9,7 @@ import {
 } from './guards';
 import { errorMessage, logger } from './logger';
 import { evaluatePolicy, PolicyDecision } from './policy';
+import { ToolLog } from './process';
 import { assertScanId, newScanId, ReportStore } from './report-store';
 import { runKatana } from './scanners/katana';
 import { runNuclei } from './scanners/nuclei';
@@ -35,6 +36,8 @@ export interface ScanContext {
   env?: NodeJS.ProcessEnv;
   workspaceRoots?: string[];
   resolver?: Resolver;
+  /** Receives the scanners' own logs line by line; omitted = scanners run in their quiet modes. */
+  toolLog?: ToolLog;
 }
 
 export interface ScanOutcome {
@@ -57,6 +60,7 @@ function resolveTool(request: ScanRequest, rules: SecurityRules): string {
 async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Promise<{ target: string; run: () => Promise<ScannerOutput> }> {
   const env = ctx.env ?? process.env;
   const { rules } = ctx;
+  const log = ctx.toolLog;
 
   if (request.scanType === 'dast') {
     const url = await assertSafeDastTarget(request.target, rules.dast.target_policy, ctx.resolver);
@@ -77,7 +81,8 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
                 jsCrawl: crawl.js_crawl,
                 rateLimit: nuclei.rate_limit,
                 requestTimeoutSeconds: nuclei.request_timeout_seconds,
-                env
+                env,
+                log
               })
             : [];
         const output = await runNuclei(
@@ -93,7 +98,8 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
             concurrency: nuclei.concurrency,
             requestTimeoutSeconds: nuclei.request_timeout_seconds,
             timeoutSeconds: nuclei.timeout_seconds,
-            env
+            env,
+            log
           }
         );
         return {
@@ -115,6 +121,7 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
           timeoutSeconds: trivy.timeout_seconds,
           scanners: trivy.scanners,
           ignoreUnfixed: trivy.ignore_unfixed,
+          log,
           ...(env['TRIVY_CACHE_DIR'] ? { cacheDir: env['TRIVY_CACHE_DIR'] } : {})
         })
     };
@@ -135,7 +142,8 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
           exclude: opengrep.exclude,
           timeoutSeconds: opengrep.timeout_seconds,
           taintIntrafile: opengrep.taint_intrafile,
-          env
+          env,
+          log
         })
     };
   }
@@ -150,6 +158,7 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
           timeoutSeconds: trivy.timeout_seconds,
           scanners: trivy.scanners,
           ignoreUnfixed: trivy.ignore_unfixed,
+          log,
           ...(env['TRIVY_CACHE_DIR'] ? { cacheDir: env['TRIVY_CACHE_DIR'] } : {})
         })
     };
@@ -160,7 +169,8 @@ async function prepare(request: ScanRequest, tool: string, ctx: ScanContext): Pr
     run: () =>
       runOsvScanner(target, {
         bin: env['OSV_SCANNER_PATH'] || 'osv-scanner',
-        timeoutSeconds: rules.sca.osv_scanner.timeout_seconds
+        timeoutSeconds: rules.sca.osv_scanner.timeout_seconds,
+        log
       })
   };
 }

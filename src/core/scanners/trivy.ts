@@ -1,4 +1,4 @@
-import { parseJsonOutput, runCommand, stderrTail } from '../process';
+import { parseJsonOutput, runCommand, stderrTail, ToolLog } from '../process';
 import { Finding, ScannerOutput, Severity, UNKNOWN_SEVERITY } from '../types';
 
 export interface TrivyOptions {
@@ -7,6 +7,8 @@ export interface TrivyOptions {
   scanners: string[];
   ignoreUnfixed: boolean;
   cacheDir?: string;
+  /** Stream the scanner's own log (stderr) here; the scanner's quiet mode is turned off. */
+  log?: ToolLog;
 }
 
 interface TrivyVulnerability {
@@ -131,12 +133,13 @@ export function parseTrivy(report: TrivyReport): ScannerOutput {
 }
 
 async function runTrivy(mode: 'fs' | 'image', target: string, options: TrivyOptions, cwd?: string): Promise<ScannerOutput> {
-  const args = [mode, '--format', 'json', '--quiet', '--exit-code', '0', '--scanners', options.scanners.join(',')];
+  // With logs on, keep trivy's INFO/WARN lines but not its progress bars.
+  const args = [mode, '--format', 'json', options.log ? '--no-progress' : '--quiet', '--exit-code', '0', '--scanners', options.scanners.join(',')];
   if (options.ignoreUnfixed) args.push('--ignore-unfixed');
   if (options.cacheDir) args.push('--cache-dir', options.cacheDir);
   args.push('--', target);
 
-  const runOptions = { timeoutMs: options.timeoutSeconds * 1000, ...(cwd ? { cwd } : {}) };
+  const runOptions = { timeoutMs: options.timeoutSeconds * 1000, log: options.log, ...(cwd ? { cwd } : {}) };
   const { code, stdout, stderr } = await runCommand(options.bin, args, runOptions);
   if (code !== 0) {
     throw new Error(`trivy exited with code ${code}: ${stderrTail(stderr)}`);
