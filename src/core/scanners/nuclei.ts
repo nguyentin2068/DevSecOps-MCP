@@ -2,7 +2,7 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { validateOptionValue } from '../guards';
-import { runCommand, stderrTail } from '../process';
+import { runCommand, stderrTail, ToolLog } from '../process';
 import { Finding, ScannerOutput, Severity, UNKNOWN_SEVERITY } from '../types';
 
 export interface NucleiOptions {
@@ -17,6 +17,8 @@ export interface NucleiOptions {
   requestTimeoutSeconds: number;
   timeoutSeconds: number;
   env?: NodeJS.ProcessEnv;
+  /** Stream the scanner's own log (stderr) here; the scanner's quiet mode is turned off. */
+  log?: ToolLog;
 }
 
 export interface NucleiTargets {
@@ -112,7 +114,6 @@ export function nucleiArgs(listFile: string, options: NucleiOptions, fuzzPass: b
   const args = [
     '-l', listFile,
     '-jsonl',
-    '-silent',
     '-nc',
     '-duc',
     // No out-of-band callbacks to public interactsh servers (would leak target details).
@@ -133,6 +134,7 @@ export function nucleiArgs(listFile: string, options: NucleiOptions, fuzzPass: b
   if (options.includeTags.length) args.push('-tags', options.includeTags.join(','));
   if (options.excludeTags.length) args.push('-etags', options.excludeTags.join(','));
   if (options.excludeTemplateIds.length) args.push('-eid', options.excludeTemplateIds.join(','));
+  if (!options.log) args.push('-silent');
   if (fuzzPass) args.push('-dast');
   return args;
 }
@@ -140,6 +142,7 @@ export function nucleiArgs(listFile: string, options: NucleiOptions, fuzzPass: b
 async function runPass(listFile: string, options: NucleiOptions, fuzzPass: boolean): Promise<ScannerOutput> {
   const { code, stdout, stderr } = await runCommand(options.bin, nucleiArgs(listFile, options, fuzzPass), {
     timeoutMs: options.timeoutSeconds * 1000,
+    log: options.log,
     ...(options.env ? { env: options.env } : {})
   });
   if (code !== 0) {

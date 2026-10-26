@@ -24,6 +24,7 @@ Scan options:
   --scan-id <id>          explicit id ([a-z0-9_-], 3-128 chars); generated when omitted
   --dast-mode <mode>      baseline|full: full adds nuclei's fuzzing (DAST) templates; test environments only
   --no-fail               always exit 0 on a policy FAIL (scanner errors still exit 2)
+  --quiet                 do not stream the scanners' own logs to stderr (run them in quiet mode)
 
 Common options:
   --rules <file>          policy file (default: $SECURITY_RULES_PATH or src/config/security-rules.yml)
@@ -63,6 +64,7 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
         'scan-id': { type: 'string', multiple: true },
         'dast-mode': { type: 'string' },
         'no-fail': { type: 'boolean', default: false },
+        quiet: { type: 'boolean', default: false },
         rules: { type: 'string' },
         'reports-dir': { type: 'string' },
         format: { type: 'string', default: 'markdown' },
@@ -103,7 +105,8 @@ export async function main(argv: string[], io: Io = defaultIo, env: NodeJS.Proce
           ...(scanIds[0] ? { scanId: scanIds[0] } : {}),
           ...(dastMode ? { dastMode } : {})
         },
-        { rules, store, env }
+        // Scanner logs go to stderr with a [tool] prefix; stdout keeps only the CLI's own summary.
+        { rules, store, env, ...(values.quiet ? {} : { toolLog: io.err }) }
       );
 
       const { result, decision, reportDir } = outcome;

@@ -1,4 +1,4 @@
-import { runCommand, stderrTail } from '../process';
+import { runCommand, stderrTail, ToolLog } from '../process';
 
 export interface KatanaOptions {
   bin: string;
@@ -9,6 +9,8 @@ export interface KatanaOptions {
   rateLimit: number;
   requestTimeoutSeconds: number;
   env?: NodeJS.ProcessEnv;
+  /** Stream the scanner's own log (stderr) here; the scanner's quiet mode is turned off. */
+  log?: ToolLog;
 }
 
 interface KatanaRecord {
@@ -59,7 +61,6 @@ export function parseKatana(output: string, target: URL, maxUrls: number): strin
 export async function runKatana(target: URL, options: KatanaOptions): Promise<string[]> {
   const args = [
     '-jsonl',
-    '-silent',
     '-nc',
     '-or',
     '-ob',
@@ -71,12 +72,14 @@ export async function runKatana(target: URL, options: KatanaOptions): Promise<st
     '-timeout', String(options.requestTimeoutSeconds),
     '-kf', 'all'
   ];
+  if (!options.log) args.push('-silent');
   if (options.jsCrawl) args.push('-jc');
   args.push('-u', target.toString());
 
   // katana's own crawl-duration is the soft limit; this timeout is the hard stop.
   const { code, stdout, stderr } = await runCommand(options.bin, args, {
     timeoutMs: (options.maxDurationSeconds + 60) * 1000,
+    log: options.log,
     ...(options.env ? { env: options.env } : {})
   });
   if (code !== 0) {
