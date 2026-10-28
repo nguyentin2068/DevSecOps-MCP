@@ -67,3 +67,9 @@ export function loadRuleIdCatalog(file: string): RuleIdCatalog {
   }
   return new RuleIdCatalog(parsed.ids);
 }
+
+/** Project ID -> opengrep-rules key, for reports that show which rule file a finding came from. */
+export function readRuleIdKeys(file: string): Record<string, string> {
+  const parsed = JSON.parse(readFileSync(file, 'utf8')) as RuleIdCatalogFile;
+  return parsed.ids ?? {};
+}

@@ -69,7 +69,7 @@ describe('toGenericReport', () => {
 });
 
 describe('importToDefectDojo', () => {
-  function fakeDojo(existing: Array<{ id: number; unique_id_from_tool: string; tags: string[] }>) {
+  function fakeDojo(existing: Array<{ id: number; test: number; unique_id_from_tool: string; tags: string[] }>) {
     const calls: Array<{ method: string; url: string; headers: Record<string, string>; body?: unknown }> = [];
     let nextTest = 10;
     const fetchImpl = (async (url: string, init: RequestInit) => {
@@ -91,8 +91,10 @@ describe('importToDefectDojo', () => {
   it('reimports each completed scan as its own test, skips failed scans, and syncs tags', async () => {
     const report = await triageReport();
     const { client, calls } = fakeDojo([
-      { id: 1, unique_id_from_tool: osvFinding.id, tags: ['team-payments', 'ai-needs-review'] },
-      { id: 2, unique_id_from_tool: 'gone', tags: ['ai-false-positive'] }
+      { id: 1, test: 10, unique_id_from_tool: osvFinding.id, tags: ['team-payments', 'ai-needs-review'] },
+      { id: 2, test: 10, unique_id_from_tool: 'gone', tags: ['ai-false-positive'] },
+      // Another test's finding, as a server that ignored ?test= would return it: never edited.
+      { id: 3, test: 99, unique_id_from_tool: osvFinding.id, tags: ['ai-needs-review'] }
     ]);
     const outcomes = await importToDefectDojo(client, [osv, failed, sast], context, report);
 
@@ -129,6 +131,14 @@ describe('importToDefectDojo', () => {
       ['2/', []]
     ]);
     expect(outcomes[0]!.tags_updated).toBe(2);
+  });
+
+  it('keeps AI tags from earlier builds when the report has correlation only', async () => {
+    const correlationOnly = await runTriage(correlate([osv, trivy]), { config: loadDefaultRules().triage, scanIds: ['sca-osv-b1', 'sca-trivy-b1'] });
+    const { client, calls } = fakeDojo([{ id: 1, test: 10, unique_id_from_tool: osvFinding.id, tags: ['ai-true-positive', 'ai-priority-p1'] }]);
+    await importToDefectDojo(client, [osv], context, correlationOnly);
+    const patch = calls.find((call) => call.method === 'PATCH')!;
+    expect(JSON.parse(String(patch.body)).tags).toEqual(['ai-true-positive', 'ai-priority-p1', expect.stringMatching(/^corr-[0-9a-f]{12}$/)]);
   });
 
   it('refuses URLs with credentials, pagination to another host, and reports HTTP errors without the token', async () => {
